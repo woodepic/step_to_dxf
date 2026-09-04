@@ -6,7 +6,6 @@ overlapping a neighbour, and the DXF says the same thing the preview did.
 """
 from __future__ import annotations
 
-import math
 from collections import Counter
 
 import ezdxf
@@ -14,7 +13,7 @@ import pytest
 
 from conftest import SAMPLE_STEP, requires_sample
 from plynest import occ_utils as occ
-from plynest.config import ExportSettings, LabelSettings, NestSettings, RunSettings
+from plynest.config import ExportSettings, NestSettings, RunSettings
 from plynest.dxf_export import export
 from plynest.pipeline import run
 from plynest.step_loader import load_step
@@ -178,7 +177,7 @@ def test_dxf_round_trip_reproduces_every_part(job, tmp_path):
 
 
 def test_export_modes_all_produce_readable_files(job, tmp_path):
-    for mode, expect in (("per_sheet", "=="), ("per_depth", ">="), ("single_file", "==1")):
+    for mode in ("per_sheet", "per_depth", "single_file"):
         out = tmp_path / mode
         paths = export(job.result, ExportSettings(unit="in", mode=mode), out,
                        labels=job.labels)

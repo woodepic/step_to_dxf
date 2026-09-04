@@ -16,9 +16,9 @@ import ezdxf
 from ezdxf.document import Drawing
 
 from .config import ExportSettings
-from .geom2d import Arc, Contour, Line, Point, Region
+from .geom2d import Arc, Contour, Point, Region
 from .labels import LabelPlacement
-from .nest import NestResult, Placement, Sheet
+from .nest import NestResult, Sheet
 from .units import INSUNITS, from_mm
 
 # ACI colour indices, cycled per depth so layers are distinguishable on screen.

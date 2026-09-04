@@ -8,7 +8,6 @@ tell us the part is upside down.
 """
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -17,7 +16,6 @@ from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Plane
 from OCP.TopoDS import TopoDS_Shape
 
 from . import occ_utils as occ
-from .geom2d import ARC_CHORD_TOL, Contour, Point, Region
 from .part import Part, PartAnalysis, Pocket
 from .profile import face_to_region, in_plane_alignment_angle
 from .step_loader import LoadedSolid

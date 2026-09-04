@@ -6,7 +6,7 @@ import string
 
 import pytest
 
-from plynest.font import CAP, GLYPHS, TOFU, glyph_for, text_extents, text_strokes
+from plynest.font import TOFU, glyph_for, text_extents, text_strokes
 
 PRINTABLE = string.ascii_letters + string.digits + " /\\-_.,:;()[]<>#+=*'\"!?&@%"
 

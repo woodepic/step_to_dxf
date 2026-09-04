@@ -1,15 +1,13 @@
 """Nesting invariants: nothing lost, nothing overlapping, nothing off the sheet."""
 from __future__ import annotations
 
-import math
 
 import pytest
-from shapely import affinity
 
 from plynest.config import NestSettings, SheetSpec
-from plynest.geom2d import Contour, Point, Region
-from plynest.nest import Placement, nest
-from plynest.part import Part, Pocket
+from plynest.geom2d import Contour, Region
+from plynest.nest import nest
+from plynest.part import Part
 
 
 def make_part(pid: str, w: float, h: float, thickness: float = 18.0) -> Part:

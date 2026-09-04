@@ -5,7 +5,7 @@ import pytest
 
 from plynest.config import RunSettings, SheetSpec
 from plynest.step_loader import LoadedSolid, StepLoadError, abbreviate, label_for, load_step
-from plynest.pipeline import unique_labels, run
+from plynest.pipeline import unique_labels
 from plynest.units import MM_PER_INCH, format_length, from_mm, to_mm
 
 

@@ -70,8 +70,8 @@ def test_label_avoids_through_holes():
     part = flatten(plate_with_through_hole(200, 200, 18, r=40, at=(150, 50)))
     placement = place_label(part, "PANEL", LabelSettings(corner="bottom_right"))
     assert placement.fitted
-    hole = part.profile.holes[0].to_polygon() if False else None
-    outline = part.profile.to_polygon()  # holes are already excluded
+    assert len(part.profile.holes) == 1
+    outline = part.profile.to_polygon()  # the hole is already cut out of this
     for geom in stroke_geoms(placement):
         assert outline.contains(geom)
 

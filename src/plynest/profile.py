@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import math
 
-from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve
 from OCP.BRepTools import BRepTools_WireExplorer
 from OCP.GCPnts import GCPnts_QuasiUniformDeflection
-from OCP.GeomAbs import GeomAbs_BSplineCurve, GeomAbs_Circle, GeomAbs_Line
+from OCP.GeomAbs import GeomAbs_Circle, GeomAbs_Line
 from OCP.TopAbs import TopAbs_REVERSED
 from OCP.TopoDS import TopoDS_Face, TopoDS_Wire
 

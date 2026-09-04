@@ -8,7 +8,7 @@ geometry, which is what a router's CAM wants.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from shapely.geometry import LinearRing, Polygon

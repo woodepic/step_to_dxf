@@ -101,7 +101,6 @@ class RunSettings:
             for key, value in payload.items():
                 if key not in names:
                     continue
-                ftype = names[key].type
                 if key == "sheet":
                     kwargs[key] = build(SheetSpec, value)
                 else:

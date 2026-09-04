@@ -1,7 +1,6 @@
 """Read the exported DXF back and check it says what the layout says."""
 from __future__ import annotations
 
-import math
 from collections import Counter
 
 import ezdxf
@@ -18,7 +17,6 @@ from plynest.config import ExportSettings, NestSettings, SheetSpec
 from plynest.dxf_export import export
 from plynest.nest import nest
 from plynest.orient import analyse
-from plynest.units import MM_PER_INCH
 
 
 def build(shapes, **nest_kw):

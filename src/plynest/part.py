@@ -1,9 +1,9 @@
 """The sheet-part model: a flat profile, a stack of pockets, and a thickness."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from .geom2d import ARC_CHORD_TOL, Contour, Point, Region
+from .geom2d import ARC_CHORD_TOL, Region
 
 
 @dataclass(frozen=True)

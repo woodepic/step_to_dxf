@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from plynest.geom2d import Arc, Contour, Line, Point, Region, polygon_to_regions
+from plynest.geom2d import Arc, Contour, Point, Region, polygon_to_regions
 
 
 def rect(w=10.0, h=4.0, x=0.0, y=0.0) -> Contour:

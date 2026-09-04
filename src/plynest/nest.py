@@ -349,7 +349,7 @@ def _place_all(ordered: list[Part], rect, settings: NestSettings, scan: str,
     return packers, assignments, unplaced
 
 
-def _consolidate(packers, assignments, rect, settings, variant_cache, scan) -> None:
+def _consolidate(packers, assignments, variant_cache, scan) -> None:
     """Try to empty the emptiest sheet into the others, repeatedly.
 
     First-fit leaves a sparse tail sheet; redistributing it often removes a whole
@@ -417,7 +417,7 @@ def _pack_group(parts: list[Part], thickness: float, settings: NestSettings,
             packers, assignments, unplaced = _place_all(
                 ordered, rect, settings, scan, variant_cache
             )
-            _consolidate(packers, assignments, rect, settings, variant_cache, scan)
+            _consolidate(packers, assignments, variant_cache, scan)
             # Fewer sheets first; then push the leftover onto as few sheets as
             # possible so the offcut is one usable piece rather than a comb.
             spread = sorted((p.area_used for p in packers))
