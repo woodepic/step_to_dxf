@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>plynest — STEP to sheet DXF</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>plynest</h1>
+  <p class="tag">STEP assembly &rarr; nested 4&times;8 plywood sheets &rarr; CNC-ready DXF</p>
+</header>
+
+<main>
+  <aside id="panel">
+    <section class="card" id="upload-card">
+      <h2>1 &middot; STEP file</h2>
+      <label class="drop" id="drop">
+        <input type="file" id="file" accept=".step,.stp" hidden>
+        <span id="drop-text">Drop a .step file here, or click to browse</span>
+      </label>
+      <p class="hint" id="upload-info"></p>
+    </section>
+
+    <section class="card">
+      <h2>2 &middot; Settings</h2>
+
+      <fieldset>
+        <legend>Stock</legend>
+        <div class="row">
+          <label>Units
+            <select id="unit">
+              <option value="in" selected>inches</option>
+              <option value="mm">millimetres</option>
+            </select>
+          </label>
+        </div>
+        <div class="row two">
+          <label>Sheet width <input type="number" id="sheet-w" step="0.01"></label>
+          <label>Sheet height <input type="number" id="sheet-h" step="0.01"></label>
+        </div>
+        <div class="row two">
+          <label>Kerf <span class="q" title="Clearance guaranteed between neighbouring parts, normally your cutter diameter. Exported geometry stays nominal size.">?</span>
+            <input type="number" id="kerf" step="0.001"></label>
+          <label>Edge keep-out <span class="q" title="Uncuttable border of the sheet, left for hold-down bolts and clamps.">?</span>
+            <input type="number" id="keepout" step="0.001"></label>
+        </div>
+        <div class="row two">
+          <label>Rotation
+            <select id="rotation">
+              <option value="90" selected>90&deg; steps</option>
+              <option value="180">180&deg; only (keeps grain)</option>
+              <option value="none">No rotation</option>
+              <option value="free">Any angle</option>
+            </select>
+          </label>
+          <label>Search effort <span class="q" title="How many part orderings to try. More is slower but may save a sheet.">?</span>
+            <input type="number" id="attempts" min="1" max="24" step="1"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>
+          <label class="inline"><input type="checkbox" id="labels-on" checked> Engrave part names</label>
+        </legend>
+        <div id="label-opts">
+          <div class="row two">
+            <label>Text height <input type="number" id="label-h" step="0.01"></label>
+            <label>Engrave depth <input type="number" id="label-d" step="0.001"></label>
+          </div>
+          <div class="row two">
+            <label>Position
+              <select id="label-corner">
+                <option value="bottom_right" selected>Bottom right</option>
+                <option value="bottom_left">Bottom left</option>
+                <option value="top_right">Top right</option>
+                <option value="top_left">Top left</option>
+                <option value="center">Centre</option>
+              </select>
+            </label>
+            <label>Naming
+              <select id="label-style">
+                <option value="abbrev_path" selected>AC4/DA2/Floor</option>
+                <option value="full_path">Full assembly path</option>
+                <option value="parent_name">Parent / part</option>
+                <option value="name">Part name only</option>
+                <option value="name_index">Part name + number</option>
+              </select>
+            </label>
+          </div>
+          <div class="row two">
+            <label>Edge margin <span class="q" title="Keep the text at least this far inside the part outline.">?</span>
+              <input type="number" id="label-margin" step="0.01"></label>
+            <label>Feature clearance <span class="q" title="Keep the text this far away from any pocket, rabbet or hole.">?</span>
+              <input type="number" id="label-clear" step="0.01"></label>
+          </div>
+          <label class="inline"><input type="checkbox" id="label-upper" checked> Uppercase</label>
+        </div>
+      </fieldset>
+
+      <button id="run" class="primary" disabled>Nest sheets</button>
+      <div id="progress" hidden><div id="bar"></div><span id="stage"></span></div>
+    </section>
+
+    <section class="card" id="export-card" hidden>
+      <h2>3 &middot; Export DXF</h2>
+      <div class="row">
+        <label>DXF units
+          <select id="ex-unit">
+            <option value="in" selected>inches</option>
+            <option value="mm">millimetres</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>File layout
+          <select id="ex-mode">
+            <option value="per_sheet" selected>One DXF per sheet (a layer per depth)</option>
+            <option value="per_depth">One DXF per sheet, per depth</option>
+            <option value="single_file">One DXF containing every sheet</option>
+          </select>
+        </label>
+      </div>
+      <label class="inline"><input type="checkbox" id="ex-labels" checked> Include engraved labels</label>
+      <label class="inline"><input type="checkbox" id="ex-outline" checked> Include sheet outline</label>
+      <label class="inline"><input type="checkbox" id="ex-keepout" checked> Include keep-out rectangle</label>
+      <button id="export" class="primary">Build &amp; download .zip</button>
+      <p class="hint" id="export-info"></p>
+    </section>
+  </aside>
+
+  <section id="viewer">
+    <div id="viewer-bar">
+      <div id="sheet-tabs"></div>
+      <div class="spacer"></div>
+      <div id="view-toggles">
+        <label class="inline"><input type="checkbox" id="v-labels" checked> Labels</label>
+        <label class="inline"><input type="checkbox" id="v-pockets" checked> Pockets</label>
+        <label class="inline"><input type="checkbox" id="v-holes" checked> Holes</label>
+        <label class="inline"><input type="checkbox" id="v-keepout" checked> Keep-out</label>
+        <button id="fit" class="ghost" title="Fit to window">Fit</button>
+      </div>
+    </div>
+    <div id="stage-wrap"><svg id="svg"></svg></div>
+    <div id="statusbar"><span id="sheet-info">No layout yet — upload a STEP file to begin.</span></div>
+  </section>
+</main>
+
+<div id="warnings" hidden>
+  <h3>Warnings <button id="warn-close" class="ghost">close</button></h3>
+  <ul id="warn-list"></ul>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
