@@ -11,6 +11,9 @@ const state = {
   sheet: 0,
   view: { x: 0, y: 0, scale: 1 },
   unit: 'in',
+  // While true, any change in the viewer's size re-fits the sheet. Panning or
+  // zooming clears it, so the view is never yanked away from the user.
+  autoFit: true,
 };
 
 /* ---------- units ---------------------------------------------------- */
@@ -143,9 +146,8 @@ async function poll() {
   $('export-card').hidden = false;
   $('progress').hidden = true;
   buildTabs();
-  // Defer the first fit: adding the sheet tabs can wrap the toolbar onto a
-  // second row, which changes the height we are fitting into.
-  requestAnimationFrame(fitView);
+  state.autoFit = true;
+  fitView();
   showWarnings(layout.warnings.concat(
     layout.unplaced.map((u) => `${u.label}: NOT PLACED — ${u.reason}`)));
 }
@@ -158,7 +160,7 @@ function buildTabs() {
     const b = document.createElement('button');
     b.className = 'tab' + (i === state.sheet ? ' on' : '');
     b.textContent = `${i + 1} · ${fmt(sheet.thickness_mm, state.unit === 'in' ? 3 : 1)}${state.unit}`;
-    b.onclick = () => { state.sheet = i; buildTabs(); fitView(); };
+    b.onclick = () => { state.sheet = i; buildTabs(); state.autoFit = true; fitView(); };
     tabs.appendChild(b);
   });
 }
@@ -170,6 +172,7 @@ function currentSheet() {
 function fitView() {
   const sheet = currentSheet();
   if (!sheet) return;
+  state.autoFit = true;
   const wrap = $('stage-wrap').getBoundingClientRect();
   const pad = 26;
   const scale = Math.min((wrap.width - pad * 2) / sheet.width_mm,
@@ -263,7 +266,8 @@ const sheet_count = () => state.layout.sheets.length;
   const svg = $('svg');
   let dragging = false, lastX = 0, lastY = 0;
   svg.addEventListener('mousedown', (e) => {
-    dragging = true; lastX = e.clientX; lastY = e.clientY; svg.classList.add('drag');
+    dragging = true; lastX = e.clientX; lastY = e.clientY;
+    state.autoFit = false; svg.classList.add('drag');
   });
   addEventListener('mouseup', () => { dragging = false; svg.classList.remove('drag'); });
   addEventListener('mousemove', (e) => {
@@ -278,6 +282,7 @@ const sheet_count = () => state.layout.sheets.length;
     const rect = svg.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const k = Math.exp(-e.deltaY * 0.0015);
+    state.autoFit = false;
     state.view.x = mx - (mx - state.view.x) * k;
     state.view.y = my - (my - state.view.y) * k;
     state.view.scale *= k;
@@ -342,5 +347,12 @@ function showWarnings(list) {
   $('warn-close').onclick = () => { $('warnings').hidden = true; };
   $('labels-on').onchange = (e) => { $('label-opts').style.opacity = e.target.checked ? 1 : .45; };
   ['v-labels', 'v-pockets', 'v-holes', 'v-keepout'].forEach((id) => { $(id).onchange = render; });
-  addEventListener('resize', () => state.layout && render());
+  // The toolbar wraps to a second row once there are enough sheet tabs, and
+  // that reflow lands after the first render -- which would leave the SVG's
+  // viewBox out of step with its box and silently rescale everything. Watch the
+  // element instead of trying to predict when layout settles.
+  new ResizeObserver(() => {
+    if (!state.layout) return;
+    if (state.autoFit) fitView(); else render();
+  }).observe($('stage-wrap'));
 })();
