@@ -1,0 +1,37 @@
+# Virtualenvs
+venv/
+.venv/
+env/
+
+# CAD source files (large, not source-of-truth for this repo)
+*.step
+*.STEP
+*.stp
+*.STP
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# Test & tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Program output
+out/
+output/
+*.dxf
+*.zip
+
+# Runtime upload/job scratch
+runs/
+uploads/
+
+# OS
+.DS_Store
