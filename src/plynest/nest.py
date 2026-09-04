@@ -21,11 +21,16 @@ from dataclasses import dataclass, field
 import numpy as np
 from shapely import affinity
 from shapely.geometry import Polygon
+from shapely.geometry import box as shp_box
 from shapely.strtree import STRtree
 
 from .config import ROTATION_ANGLES, NestSettings, SheetSpec
 from .geom2d import ARC_CHORD_TOL, Region
 from .part import Part
+
+_EPS = 1e-6
+_MAX_REFINE = 400
+"""Cap on exact outline checks per scan line, to bound worst-case cost."""
 
 THICKNESS_TOL = 0.05
 """Parts within this many mm of each other are treated as the same stock."""
@@ -95,6 +100,8 @@ class _Variant:
     h: float
     ox: float
     oy: float
+    is_box: bool = False
+    """True when the outline fills its bounding box, so box tests are exact."""
 
 
 class _SheetPacker:
@@ -108,63 +115,107 @@ class _SheetPacker:
         self.polys: list[Polygon] = []
         self.boxes = np.zeros((0, 4), dtype=float)
         self.area_used = 0.0
+        self.cand_x: set[float] = {self.x0}
+        self.cand_y: set[float] = {self.y0}
+        self.has_concave = False
         self._tree: STRtree | None = None
 
     def snapshot(self):
-        return (list(self.polys), self.boxes.copy(), self.area_used, self._tree)
+        return (list(self.polys), self.boxes.copy(), self.area_used,
+                set(self.cand_x), set(self.cand_y), self._tree, self.has_concave)
 
     def restore(self, snap) -> None:
-        self.polys, self.boxes, self.area_used, self._tree = list(snap[0]), snap[1].copy(), snap[2], snap[3]
+        self.polys = list(snap[0])
+        self.boxes = snap[1].copy()
+        self.area_used = snap[2]
+        self.cand_x = set(snap[3])
+        self.cand_y = set(snap[4])
+        self._tree = snap[5]
+        self.has_concave = snap[6]
 
-    def _fits(self, poly: Polygon, cx: float, cy: float, w: float, h: float) -> bool:
-        if len(self.boxes):
-            bx0, by0 = cx - self.gap, cy - self.gap
-            bx1, by1 = cx + w + self.gap, cy + h + self.gap
-            # Inflated bounding boxes reject the vast majority of candidates cheaply.
-            overlap = (
-                (self.boxes[:, 0] < bx1)
-                & (self.boxes[:, 2] > bx0)
-                & (self.boxes[:, 1] < by1)
-                & (self.boxes[:, 3] > by0)
-            )
-            if overlap.any():
-                # Boxes touch, so compare the real outlines.
-                probe = affinity.translate(poly, cx, cy).buffer(
-                    self.gap / 2.0, join_style=2, mitre_limit=4.0
-                )
-                assert self._tree is not None
-                for idx in self._tree.query(probe):
-                    other = self.polys[int(idx)].buffer(
-                        self.gap / 2.0, join_style=2, mitre_limit=4.0
-                    )
-                    if other.intersects(probe):
-                        return False
-        return True
+    def _clear_of(self, poly: Polygon, other: Polygon) -> bool:
+        """True when ``poly`` keeps at least ``gap`` away from ``other``.
 
-    def _candidates(self, w: float, h: float) -> list[tuple[float, float]]:
+        Expressed as a distance rather than by buffering both outlines: two
+        shapes exactly ``gap`` apart have touching buffers, and shapely counts
+        touching as intersecting, which would reject correct placements.
+        """
+        if self.gap > _EPS:
+            return poly.distance(other) >= self.gap - _EPS
+        return poly.intersection(other).area <= _EPS
+
+    def _axis_candidates(self, w: float, h: float):
         max_x, max_y = self.x1 - w, self.y1 - h
-        if max_x < self.x0 - 1e-9 or max_y < self.y0 - 1e-9:
-            return []
-        xs = {self.x0}
-        ys = {self.y0}
-        for bx0, by0, bx1, by1 in self.boxes:
-            xs.add(bx1 + self.gap)
-            xs.add(bx0)
-            ys.add(by1 + self.gap)
-            ys.add(by0)
-        xs_l = sorted(v for v in xs if self.x0 - 1e-9 <= v <= max_x + 1e-9)
-        ys_l = sorted(v for v in ys if self.y0 - 1e-9 <= v <= max_y + 1e-9)
-        if self.scan == "lb":
-            return [(x, y) for x in xs_l for y in ys_l]
-        return [(x, y) for y in ys_l for x in xs_l]
+        if max_x < self.x0 - _EPS or max_y < self.y0 - _EPS:
+            return None
+        xs = np.array(sorted(v for v in self.cand_x if self.x0 - _EPS <= v <= max_x + _EPS))
+        ys = np.array(sorted(v for v in self.cand_y if self.y0 - _EPS <= v <= max_y + _EPS))
+        if xs.size == 0 or ys.size == 0:
+            return None
+        return xs, ys
+
+    def _free_mask(self, fixed: float, moving: np.ndarray, w: float, h: float,
+                   along_x: bool) -> np.ndarray:
+        """Which positions along one scan line clear every placed bounding box.
+
+        A candidate whose box, grown by the kerf, misses every placed box is
+        guaranteed to clear the outlines inside them -- so this is both the fast
+        rejection and, for rectangular parts, the whole answer.
+        """
+        if not len(self.boxes):
+            return np.ones(moving.shape, dtype=bool)
+        if along_x:
+            cx, cy = moving, np.full(moving.shape, fixed)
+        else:
+            cx, cy = np.full(moving.shape, fixed), moving
+        lo_x = (cx - self.gap)[:, None]
+        hi_x = (cx + w + self.gap)[:, None]
+        lo_y = (cy - self.gap)[:, None]
+        hi_y = (cy + h + self.gap)[:, None]
+        b = self.boxes
+        overlap = (
+            (b[None, :, 0] < hi_x - _EPS)
+            & (b[None, :, 2] > lo_x + _EPS)
+            & (b[None, :, 1] < hi_y - _EPS)
+            & (b[None, :, 3] > lo_y + _EPS)
+        )
+        return ~overlap.any(axis=1)
 
     def try_place(self, v: _Variant) -> tuple[float, float] | None:
-        """First feasible position in scan order, or None."""
-        if self.area_used + v.poly.area > self.capacity + 1e-9:
+        """First position in scan order that clears everything, or None."""
+        if self.area_used + v.poly.area > self.capacity + _EPS:
             return None  # cannot possibly fit; skip the scan entirely
-        for x, y in self._candidates(v.w, v.h):
-            if self._fits(v.poly, x, y, v.w, v.h):
-                return (x, y)
+        axes = self._axis_candidates(v.w, v.h)
+        if axes is None:
+            return None
+        xs, ys = axes
+
+        # Only a non-rectangular outline can fit where bounding boxes overlap.
+        refine = self.has_concave or not v.is_box
+        checked = 0
+        outer, inner = (ys, xs) if self.scan == "bl" else (xs, ys)
+        for fixed in outer:
+            free = self._free_mask(fixed, inner, v.w, v.h, along_x=(self.scan == "bl"))
+            for i in np.flatnonzero(free):
+                val = inner[i]
+                return (val, fixed) if self.scan == "bl" else (fixed, val)
+            if not refine:
+                continue
+            for i in np.flatnonzero(~free):
+                if checked >= _MAX_REFINE:
+                    break
+                checked += 1
+                val = inner[i]
+                x, y = (val, fixed) if self.scan == "bl" else (fixed, val)
+                moved = affinity.translate(v.poly, x, y)
+                bx0, by0 = x - self.gap, y - self.gap
+                bx1, by1 = x + v.w + self.gap, y + v.h + self.gap
+                assert self._tree is not None
+                if all(
+                    self._clear_of(moved, self.polys[int(idx)])
+                    for idx in self._tree.query(shp_box(bx0, by0, bx1, by1))
+                ):
+                    return (x, y)
         return None
 
     def commit(self, v: _Variant, x: float, y: float) -> None:
@@ -174,6 +225,23 @@ class _SheetPacker:
         self.boxes = np.vstack([self.boxes, np.array([[b[0], b[1], b[2], b[3]]])])
         self.area_used += moved.area
         self._tree = STRtree(self.polys)
+        self._add_candidates(moved, b)
+
+    def _add_candidates(self, poly: Polygon, b: tuple[float, float, float, float]) -> None:
+        """Record the positions a later part could butt up against.
+
+        A convex outline is fully described by its bounding box, which keeps the
+        common all-rectangles case cheap.  A concave one contributes every
+        vertex, so a neighbour can drop into its notch.
+        """
+        self.cand_x.update((b[0], b[2] + self.gap))
+        self.cand_y.update((b[1], b[3] + self.gap))
+        if poly.area >= (b[2] - b[0]) * (b[3] - b[1]) - _EPS:
+            return  # a rectangle adds nothing beyond its bounding box
+        self.has_concave = True
+        for vx, vy in poly.exterior.coords:
+            self.cand_x.update((vx, vx + self.gap))
+            self.cand_y.update((vy, vy + self.gap))
 
 
 def _variants(part: Part, angles: tuple[float, ...]) -> list[_Variant]:
@@ -187,8 +255,18 @@ def _variants(part: Part, angles: tuple[float, ...]) -> list[_Variant]:
         if key in seen:
             continue  # a square part gains nothing from a 90 deg turn
         seen.add(key)
-        poly = affinity.translate(region.to_polygon(ARC_CHORD_TOL), -x0, -y0)
-        out.append(_Variant(angle, poly, w, h, -x0, -y0))
+        # Collide on the solid outline: a through hole is not usable space, and
+        # ignoring holes keeps a rectangular part exactly rectangular, which
+        # lets the packer stay on its vectorised bounding-box fast path.
+        solid = Region(region.outer)
+        poly = affinity.translate(solid.to_polygon(ARC_CHORD_TOL), -x0, -y0)
+        if solid.has_arcs():
+            # Tessellated arcs sit inside the true curve, so the real edge can
+            # bulge up to one chord tolerance past this polygon.  Grow it by
+            # that much and the kerf gap is guaranteed rather than nominal.
+            poly = poly.buffer(ARC_CHORD_TOL, join_style=2, mitre_limit=4.0)
+        is_box = poly.area >= w * h - _EPS
+        out.append(_Variant(angle, poly, w, h, -x0, -y0, is_box))
     return out
 
 

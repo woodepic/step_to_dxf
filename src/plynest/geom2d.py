@@ -78,6 +78,17 @@ class Line:
     def sample(self, tol: float = ARC_CHORD_TOL) -> list[Point]:
         return [self.start, self.end]
 
+    def bounds(self) -> tuple[float, float, float, float]:
+        return (
+            min(self.start.x, self.end.x),
+            min(self.start.y, self.end.y),
+            max(self.start.x, self.end.x),
+            max(self.start.y, self.end.y),
+        )
+
+    def area_correction(self) -> float:
+        return 0.0
+
     def length(self) -> float:
         return self.start.dist(self.end)
 
@@ -168,6 +179,35 @@ class Arc:
         """DXF LWPOLYLINE bulge factor for this arc: tan(sweep / 4)."""
         return math.tan(self.sweep() / 4.0)
 
+    def contains_angle(self, ang: float) -> bool:
+        """Does ``ang`` fall inside the swept range?"""
+        if self.full:
+            return True
+        sweep = self.sweep()
+        if sweep >= 0:
+            return _norm_angle(ang - self.start_angle) <= sweep + 1e-12
+        return _norm_angle(self.start_angle - ang) <= -sweep + 1e-12
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        """Exact bounds: the endpoints plus whichever cardinal points are swept."""
+        pts = [self.p0, self.p1]
+        for i in range(4):
+            ang = i * math.pi / 2.0
+            if self.contains_angle(ang):
+                pts.append(self._at(ang))
+        xs = [p.x for p in pts]
+        ys = [p.y for p in pts]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def area_correction(self) -> float:
+        """Signed area of the circular segment between this arc and its chord.
+
+        Adding this to the shoelace area of the chord polygon gives the region's
+        exact area, so a circle measures pi*r^2 rather than an inscribed n-gon.
+        """
+        theta = self.sweep()
+        return 0.5 * self.radius * self.radius * (theta - math.sin(theta))
+
     def length(self) -> float:
         return abs(self.sweep()) * self.radius
 
@@ -216,13 +256,15 @@ class Contour:
         return LinearRing(pts)
 
     def signed_area(self, tol: float = ARC_CHORD_TOL) -> float:
-        pts = self.sample(tol)
-        n = len(pts)
+        """Exact signed area: shoelace over the chord polygon plus arc segments."""
+        verts = [seg.start for seg in self.segments]
+        n = len(verts)
         a = 0.0
         for i in range(n):
-            p, q = pts[i], pts[(i + 1) % n]
+            p, q = verts[i], verts[(i + 1) % n]
             a += p.x * q.y - q.x * p.y
-        return a / 2.0
+        a /= 2.0
+        return a + sum(seg.area_correction() for seg in self.segments)
 
     def is_ccw(self, tol: float = ARC_CHORD_TOL) -> bool:
         return self.signed_area(tol) > 0
@@ -234,10 +276,8 @@ class Contour:
         return self if self.is_ccw() == ccw else self.reversed()
 
     def bounds(self, tol: float = ARC_CHORD_TOL) -> tuple[float, float, float, float]:
-        pts = self.sample(tol)
-        xs = [p.x for p in pts]
-        ys = [p.y for p in pts]
-        return min(xs), min(ys), max(xs), max(ys)
+        """Exact bounds, including the bulge of any arc."""
+        return bounds_union(seg.bounds() for seg in self.segments)
 
     def length(self) -> float:
         return sum(s.length() for s in self.segments)
@@ -273,6 +313,9 @@ class Region:
 
     def contours(self) -> tuple[Contour, ...]:
         return (self.outer,) + self.holes
+
+    def has_arcs(self) -> bool:
+        return any(isinstance(seg, Arc) for c in self.contours() for seg in c.segments)
 
 
 def regions_to_multipolygon(regions: Iterable[Region], tol: float = ARC_CHORD_TOL) -> BaseGeometry:

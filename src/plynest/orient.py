@@ -164,12 +164,25 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
             "the flat profile is the silhouette at the base"
         )
 
-    xmin, ymin, zmin, xmax, ymax, zmax = occ.bbox(aligned)
-    thickness = zmax - zmin
+    # Take the thickness from the face planes, not the bounding box: OCC pads a
+    # bbox by the shape tolerance, and this number becomes the through-cut depth.
+    def _levels(hs: list[_Horiz]) -> tuple[float, float] | None:
+        downs = [h.z for h in hs if not h.up]
+        ups = [h.z for h in hs if h.up]
+        if not downs or not ups:
+            return None
+        return min(downs), max(ups)
+
+    levels = _levels(horiz)
+    if levels is None:
+        return PartAnalysis(None, False, ("no flat underside found",), solid.path, solid.index)
+    z_bottom, z_top = levels
+    thickness = z_top - z_bottom
+    level_tol = max(LEVEL_TOL, thickness * 1e-3)
 
     # Rotate about Z so the part's minimum bounding rectangle is axis aligned;
     # parts arrive at whatever yaw the assembly gave them.
-    bottoms = [h for h in horiz if not h.up and abs(h.z - zmin) <= max(LEVEL_TOL, thickness * 1e-3)]
+    bottoms = [h for h in horiz if not h.up and abs(h.z - z_bottom) <= level_tol]
     if not bottoms:
         return PartAnalysis(None, False, ("no flat underside found",), solid.path, solid.index)
 
@@ -177,15 +190,15 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
     if abs(yaw) > 1e-9:
         aligned = occ.transform_shape(aligned, occ.rotation_z(yaw))
         horiz = _horizontals(aligned)
-        xmin, ymin, zmin, xmax, ymax, zmax = occ.bbox(aligned)
-        thickness = zmax - zmin
-        bottoms = [
-            h for h in horiz if not h.up and abs(h.z - zmin) <= max(LEVEL_TOL, thickness * 1e-3)
-        ]
+        levels = _levels(horiz)
+        if levels is None:
+            return PartAnalysis(None, False, ("no flat underside found",), solid.path, solid.index)
+        z_bottom, z_top = levels
+        thickness = z_top - z_bottom
+        level_tol = max(LEVEL_TOL, thickness * 1e-3)
+        bottoms = [h for h in horiz if not h.up and abs(h.z - z_bottom) <= level_tol]
 
-    # Move the profile so its bounding box starts at the origin.
-    dx, dy = -xmin, -ymin
-
+    dx = dy = 0.0
     bottom_regions = [face_to_region(b.face, dx, dy) for b in bottoms]
     bottom_regions = [r for r in bottom_regions if r is not None]
     if not bottom_regions:
@@ -205,15 +218,14 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
         profile = max(merged, key=lambda r: r.area())
 
     # Every upward face below the top surface is a pocket floor.
-    top_z = zmax
     pockets: list[Pocket] = []
     for h in horiz:
         if not h.up:
             continue
-        depth = top_z - h.z
-        if depth <= max(LEVEL_TOL, thickness * 1e-4):
+        depth = z_top - h.z
+        if depth <= level_tol:
             continue  # this is the top surface itself
-        if depth >= thickness - LEVEL_TOL:
+        if depth >= thickness - level_tol:
             continue  # coincident with the underside; already a through cut
         region = face_to_region(h.face, dx, dy)
         if region is None:
@@ -221,6 +233,12 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
         pockets.append(Pocket(depth=depth, region=region))
 
     pockets.sort(key=lambda p: p.depth)
+
+    # Finally slide everything so the outline's bounding box starts at (0, 0).
+    ox, oy, _, _ = profile.bounds()
+    if abs(ox) > 1e-12 or abs(oy) > 1e-12:
+        profile = profile.transformed(0.0, -ox, -oy)
+        pockets = [Pocket(pk.depth, pk.region.transformed(0.0, -ox, -oy)) for pk in pockets]
 
     part = Part(
         id=part_id,
