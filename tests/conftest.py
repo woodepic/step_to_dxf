@@ -170,3 +170,28 @@ def plate_with_slot_to_edge(w=400.0, h=300.0, t=18.0):
 
 def tiny_plate(w=6.0, h=4.0, t=1.0):
     return box(w, h, t)
+
+
+def write_step(named_shapes, path):
+    """Write shapes to a STEP file with names, for building test fixtures."""
+    from plynest.step_export import _write
+
+    _write(list(named_shapes), path)
+    return path
+
+
+def messy_assembly(path):
+    """A STEP file with the mix a real export throws at you.
+
+    Good parts, a part that arrives face-down, a hole, something that is not a
+    sheet part at all, and something too big for any sheet.
+    """
+    return write_step([
+        ("Good Panel", plain_plate(400, 300, 18)),
+        ("Face Down", rotate(plate_with_rabbet(400, 300, 18), (1, 0, 0), 180)),
+        ("Holed", plate_with_through_hole(350, 250, 18, r=15)),
+        ("Ball Bearing", sphere(40.0)),
+        ("Steel Bar", bar(20, 20, 400)),
+        ("Oversize Panel", plain_plate(3000, 2000, 18)),
+        ("Thin Ply", plain_plate(300, 200, 6)),
+    ], path)

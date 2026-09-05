@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..config import ExportSettings, RunSettings
-from ..dxf_export import export
+from ..dxf_export import check_dxf_version, export
 from ..geom2d import ARC_CHORD_TOL
 from ..naming import sheet_name
 from ..pipeline import Job, run as run_pipeline
@@ -280,6 +280,10 @@ def export_run(run_id: str, req: ExportRequest) -> dict[str, Any]:
             "dxf_per_sheet", "dxf_per_part", "step_per_sheet"
         ):
             raise ValueError(f"unknown export mode {export_settings.mode!r}")
+        if export_settings.unit not in ("mm", "in"):
+            raise ValueError(f"unknown unit {export_settings.unit!r}")
+        if export_settings.mode.startswith("dxf"):
+            check_dxf_version(export_settings.dxf_version)
     except Exception as exc:
         with state.lock:
             state.export_stage = "idle"

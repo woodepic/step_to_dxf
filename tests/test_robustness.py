@@ -728,3 +728,117 @@ def test_unit_conversion_is_exact_both_ways():
     for value in (0.0, 0.03, 0.5, 0.75, 48.0, 96.0, 1e6):
         assert from_mm(to_mm(value, "in"), "in") == pytest.approx(value, rel=1e-12)
     assert to_mm(1.0, "in") == MM_PER_INCH
+
+
+# --- a whole messy job, end to end ------------------------------------------
+
+@pytest.fixture(scope="module")
+def messy_job(tmp_path_factory):
+    from conftest import messy_assembly
+    from plynest.pipeline import run
+
+    path = messy_assembly(tmp_path_factory.mktemp("messy") / "messy.step")
+    settings = RunSettings()
+    settings.nest.sheet = SheetSpec(1220.0, 2440.0)
+    settings.nest.attempts = 1
+    return run(path, settings), path
+
+
+def test_messy_job_keeps_the_good_parts_and_explains_the_rest(messy_job):
+    job, _ = messy_job
+    labels = {p.label for p in job.parts}
+    assert {"Good Panel", "Face Down", "Holed", "Thin Ply"} <= labels
+    skipped = " ".join(f"{p} {why}" for p, why in job.skipped)
+    assert "Ball Bearing" in skipped and "Steel Bar" in skipped
+    assert "not a sheet part" in skipped or "planar" in skipped
+
+
+def test_messy_job_reports_the_oversize_part_rather_than_dropping_it(messy_job):
+    job, _ = messy_job
+    unplaced = {p.label for p, _ in job.result.unplaced}
+    assert "Oversize Panel" in unplaced
+    assert any("Oversize Panel" in w and "NOT PLACED" in w for w in job.warnings)
+
+
+def test_messy_job_turned_the_face_down_part_over(messy_job):
+    job, _ = messy_job
+    part = next(p for p in job.parts if p.label == "Face Down")
+    assert part.flipped
+    assert len(part.pockets) == 1
+
+
+def test_messy_job_separates_the_stock_thicknesses(messy_job):
+    job, _ = messy_job
+    for sheet in job.result.sheets:
+        assert len({round(p.part.thickness, 3) for p in sheet.placements}) == 1
+    assert {round(s.thickness) for s in job.result.sheets} == {18, 6}
+
+
+def test_messy_job_places_everything_placeable_exactly_once(messy_job):
+    job, _ = messy_job
+    placed = [p.part.label for s in job.result.sheets for p in s.placements]
+    expected = [p.label for p in job.parts
+                if p.label not in {q.label for q, _ in job.result.unplaced}]
+    assert sorted(placed) == sorted(expected)
+
+
+@pytest.mark.parametrize("mode", ["dxf_per_sheet", "dxf_per_part"])
+def test_messy_job_exports_cleanly(messy_job, tmp_path, mode):
+    import ezdxf
+
+    from plynest.dxf_export import export
+
+    job, _ = messy_job
+    paths = export(job.result, ExportSettings(mode=mode), tmp_path,
+                   labels=job.labels, parts=job.parts)
+    assert paths
+    for path in paths:
+        doc = ezdxf.readfile(path)
+        assert len(doc.modelspace()) > 0
+        assert "0" not in {e.dxf.layer for e in doc.modelspace()}
+
+
+def test_messy_job_exports_to_step_and_reloads(messy_job, tmp_path):
+    from plynest.step_export import export_step
+    from plynest.step_loader import load_step
+
+    job, _ = messy_job
+    paths = export_step(job.result, ExportSettings(engrave_labels_in_step=False),
+                        tmp_path, job.sources)
+    assert paths
+    reloaded = sum(len(load_step(p)) for p in paths)
+    assert reloaded == sum(len(s.placements) for s in job.result.sheets)
+
+
+def test_messy_job_engraved_step_keeps_every_part_solid(messy_job, tmp_path):
+    from plynest import occ_utils as occ
+    from plynest.step_export import build_sheet
+
+    job, _ = messy_job
+    for sheet in job.result.sheets:
+        for label, shape in build_sheet(sheet, job.sources, job.labels,
+                                        ExportSettings(mode="step_per_sheet"), 1.0):
+            assert occ.volume(shape) > 0, f"{label} was destroyed by engraving"
+
+
+def test_an_unusable_dxf_version_is_refused_before_writing(tmp_path):
+    """R12 has no LWPOLYLINE; failing halfway through would leave junk files."""
+    from plynest.dxf_export import export
+
+    result = nest([rect_part("a", 300, 200)], small_nest())
+    for version in ("R12", "AC1009", "NOPE", ""):
+        with pytest.raises(ValueError, match="not supported"):
+            export(result, ExportSettings(dxf_version=version), tmp_path)
+    assert not list(tmp_path.glob("*.dxf")), "nothing may be written on refusal"
+
+
+@pytest.mark.parametrize("version", ["R2000", "R2004", "R2007", "R2010", "R2013", "R2018"])
+def test_every_supported_dxf_version_writes(tmp_path, version):
+    import ezdxf
+
+    from plynest.dxf_export import export
+
+    result = nest([rect_part("a", 300, 200)], small_nest())
+    paths = export(result, ExportSettings(dxf_version=version), tmp_path / version)
+    doc = ezdxf.readfile(paths[0])
+    assert len(doc.modelspace()) > 0

@@ -42,6 +42,21 @@ COLOUR_KEEPOUT = 9
 LAYER_SHEET = "SHEET OUTLINE"
 LAYER_KEEPOUT = "EDGE KEEP-OUT"
 
+SUPPORTED_DXF_VERSIONS = ("R2000", "R2004", "R2007", "R2010", "R2013", "R2018")
+"""R12 is excluded on purpose: it has no LWPOLYLINE, so every arc would have to
+become a chord chain, which is exactly what this program avoids."""
+
+
+def check_dxf_version(version: str) -> None:
+    """Reject an unusable version before any file is written."""
+    if version not in SUPPORTED_DXF_VERSIONS:
+        raise ValueError(
+            f"DXF version {version!r} is not supported; use one of "
+            + ", ".join(SUPPORTED_DXF_VERSIONS)
+            + (" (R12 has no LWPOLYLINE, so arcs could not be kept)"
+               if version.upper() in ("R12", "AC1009") else "")
+        )
+
 
 @dataclass
 class SheetGeometry:
@@ -231,6 +246,7 @@ def export(
     parts: list[Part] | None = None,
 ) -> list[Path]:
     """Write DXF files for ``result`` and return the paths written."""
+    check_dxf_version(settings.dxf_version)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
