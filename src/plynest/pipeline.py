@@ -67,7 +67,12 @@ def analyse_parts(solids: list[LoadedSolid], settings: RunSettings,
     warnings: list[str] = []
     total = max(1, len(solids))
     for i, solid in enumerate(solids):
-        analysis = analyse(solid, names[solid.index], part_id=f"p{solid.index:04d}")
+        try:
+            analysis = analyse(solid, names[solid.index], part_id=f"p{solid.index:04d}")
+        except Exception as exc:
+            # A single malformed solid should cost you that part, not the job.
+            skipped.append((solid.path_str, f"could not be analysed: {type(exc).__name__}: {exc}"))
+            continue
         if analysis.ok and analysis.part is not None:
             parts.append(analysis.part)
             for message in analysis.part.warnings:
@@ -94,7 +99,11 @@ def run(step_path: str | Path, settings: RunSettings,
     labels: dict[str, LabelPlacement] = {}
     if settings.labels.enabled:
         for part in parts:
-            placement = place_label(part, part.label, settings.labels)
+            try:
+                placement = place_label(part, part.label, settings.labels)
+            except Exception as exc:
+                warnings.append(f"{part.label}: label could not be placed ({exc})")
+                continue
             if placement is None:
                 continue
             labels[part.id] = placement

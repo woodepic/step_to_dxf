@@ -117,9 +117,10 @@ def test_engraving_removes_the_expected_volume():
     from plynest.step_export import _engrave_tolerance
 
     label = labels[parts[0].id]
+    width = ExportSettings().engrave_tool_mm
     area = unary_union([
-        LineString([(p.x, p.y) for p in c]).buffer(ExportSettings().engrave_tool_mm / 2)
-        for c in label.sampled(_engrave_tolerance(label.height)) if len(c) >= 2
+        LineString([(p.x, p.y) for p in c]).buffer(width / 2)
+        for c in label.sampled(_engrave_tolerance(label.height, width)) if len(c) >= 2
     ]).area
     assert removed == pytest.approx(area * 1.0, rel=0.05)
     assert removed > 0

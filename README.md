@@ -166,9 +166,13 @@ from the 2D profile, so every fillet, chamfer and hole in the source survives
 exactly — the tests assert the volume is unchanged to 1 part in 10⁹.
 
 Solid text is expensive: every vertex of a groove becomes a face, and each face
-costs about a hundred STEP entities. The sample assembly comes to ~130 MB across
-ten sheets, or ~23 MB zipped. Turn off "cut the labels into the solids" and the
-same export is a few hundred KB.
+costs about a hundred STEP entities. The sample assembly comes to ~150 MB across
+ten sheets, or ~24 MB zipped, in about 20 seconds. Turn off "cut the labels into
+the solids" and the same export is a few hundred KB and near-instant.
+
+The groove defaults to 0.03″ wide. Because the STEP is a *representation* — the
+cut itself comes from the DXF, which keeps exact arcs — the groove outline is
+tessellated to a fraction of the cap height rather than to full precision.
 
 ---
 
@@ -208,13 +212,15 @@ could not be placed.
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest        # 203 tests, ~12 s
+./venv/bin/python -m pytest        # 300 tests, ~40 s
 ```
 
 The suite covers geometry transforms and exact arc maths, font coverage,
 orientation and flattening against synthetic solids of known size, label
-placement, DXF round-trips, and nesting invariants. The checks that matter most
-for trusting a cut file:
+placement, DXF and STEP round-trips, nesting invariants, the command line, the
+HTTP endpoints, and a pile of hostile inputs — spheres, bars, discs, zero-area
+outlines, negative kerfs, Windows reserved filenames, junk STEP files and
+settings full of nonsense. The checks that matter most for trusting a cut file:
 
 - every solid in the STEP file becomes a part, and every part reaches a sheet
   **exactly once**;

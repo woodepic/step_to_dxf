@@ -109,7 +109,7 @@ def test_label_shrinks_before_giving_up():
 
 
 def test_impossible_label_is_reported_not_silently_dropped():
-    part = flatten(plain_plate(30, 20, 18))
+    part = flatten(plain_plate(60, 40, 6))
     placement = place_label(part, "THIS NAME IS FAR TOO LONG TO ENGRAVE HERE", LabelSettings())
     assert not placement.fitted
     assert placement.paths == ()

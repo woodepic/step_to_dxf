@@ -8,6 +8,7 @@ tell us the part is upside down.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -24,8 +25,14 @@ from .step_loader import LoadedSolid
 NORMAL_TOL = 0.01
 # Two Z levels closer than this are the same level (mm).
 LEVEL_TOL = 1e-4
-# Minimum plate aspect ratio (in-plane extent / thickness) to accept a solid.
+# A sheet part is thin in one direction and broad in the other two.  The long
+# side has to clear this ratio against the thickness...
 MIN_PLATE_ASPECT = 1.5
+# ...and so does the short side, more gently -- that is what separates a narrow
+# plywood strip (3/4 x 1 x 24 in, ratio 1.33) from a square bar (ratio 1.0).
+MIN_WIDTH_ASPECT = 1.2
+# Below this a "thickness" is numerical noise rather than stock.
+MIN_THICKNESS = 1e-6
 # Faces below this area (mm^2) are ignored when picking the sheet axis.
 MIN_FACE_AREA = 1e-6
 
@@ -122,11 +129,17 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
     aligned = occ.transform_shape(shape, align)
     xmin, ymin, zmin, xmax, ymax, zmax = occ.bbox(aligned)
     thickness = zmax - zmin
-    in_plane = max(xmax - xmin, ymax - ymin)
-    if thickness <= 0 or in_plane / thickness < MIN_PLATE_ASPECT:
+    long_side = max(xmax - xmin, ymax - ymin)
+    short_side = min(xmax - xmin, ymax - ymin)
+    if thickness <= MIN_THICKNESS:
+        return PartAnalysis(None, False, ("has no measurable thickness",),
+                            solid.path, solid.index)
+    if (long_side / thickness < MIN_PLATE_ASPECT
+            or short_side / thickness < MIN_WIDTH_ASPECT):
         return PartAnalysis(
             None, False,
-            (f"not plate-like (thickness {thickness:.2f} mm vs extent {in_plane:.2f} mm)",),
+            (f"not a sheet part: {short_side:.1f} x {long_side:.1f} x "
+             f"{thickness:.1f} mm is a bar or block, not a panel",),
             solid.path, solid.index,
         )
 
@@ -249,6 +262,11 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
         pockets = [Pocket(pk.depth, pk.region.transformed(0.0, -ox, -oy)) for pk in pockets]
     settle = occ.translation(-ox, -oy, -z_bottom)
     total = settle.Multiplied(total)
+
+    bounds = profile.bounds()
+    if not all(math.isfinite(v) for v in bounds) or not math.isfinite(thickness):
+        return PartAnalysis(None, False, ("produced non-finite geometry",),
+                            solid.path, solid.index)
 
     part = Part(
         id=part_id,

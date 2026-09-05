@@ -283,9 +283,17 @@ class Contour:
             pts.pop()
         return pts
 
-    def to_ring(self, tol: float = ARC_CHORD_TOL) -> LinearRing:
-        pts = [(p.x, p.y) for p in self.sample(tol)]
-        return LinearRing(pts)
+    def is_degenerate(self, tol: float = ARC_CHORD_TOL) -> bool:
+        """True when this contour encloses nothing shapely could work with."""
+        pts = self.sample(tol)
+        if len(pts) < 3:
+            return True
+        return abs(self.signed_area(tol)) < 1e-12
+
+    def to_ring(self, tol: float = ARC_CHORD_TOL) -> LinearRing | None:
+        if self.is_degenerate(tol):
+            return None
+        return LinearRing([(p.x, p.y) for p in self.sample(tol)])
 
     def signed_area(self, tol: float = ARC_CHORD_TOL) -> float:
         """Exact signed area: shoelace over the chord polygon plus arc segments."""
@@ -329,13 +337,22 @@ class Region:
         )
 
     def to_polygon(self, tol: float = ARC_CHORD_TOL) -> Polygon:
-        poly = Polygon(
-            [(p.x, p.y) for p in self.outer.sample(tol)],
-            [[(p.x, p.y) for p in h.sample(tol)] for h in self.holes],
-        )
+        """Shapely form of this region, or an empty polygon if it is degenerate.
+
+        A collapsed outline (a repeated point, a zero-area sliver) would
+        otherwise raise out of shapely deep inside the nester.
+        """
+        if self.outer.is_degenerate(tol):
+            return Polygon()
+        holes = [
+            [(p.x, p.y) for p in h.sample(tol)]
+            for h in self.holes
+            if not h.is_degenerate(tol)
+        ]
+        poly = Polygon([(p.x, p.y) for p in self.outer.sample(tol)], holes)
         if not poly.is_valid:
             poly = poly.buffer(0)
-        return poly
+        return poly if isinstance(poly, Polygon) else Polygon()
 
     def bounds(self, tol: float = ARC_CHORD_TOL) -> tuple[float, float, float, float]:
         return self.outer.bounds(tol)

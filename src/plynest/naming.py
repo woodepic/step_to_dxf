@@ -13,6 +13,23 @@ from .units import from_mm
 _LAYER_BAD = re.compile(r'[<>/\\":;?*|=\']')
 _FILE_BAD = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Windows refuses these as filenames whatever the extension, so "CON.dxf"
+# simply cannot be written on a machine the operator may well be using.
+_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{stem}{i}" for stem in ("COM", "LPT") for i in range(0, 10)
+}
+
+MAX_STEM_BYTES = 180
+"""Filename budget, leaving room for an extension and a collision suffix."""
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Cut to ``limit`` UTF-8 bytes without splitting a character."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
 
 def format_thickness(value_mm: float, unit: str) -> str:
     """``19.05`` mm -> ``"0.75 in"`` or ``"19.05 mm"``."""
@@ -36,7 +53,15 @@ def safe_filename(text: str, fallback: str = "part") -> str:
     text = text.replace("/", "-").replace("\\", "-")
     text = _FILE_BAD.sub("-", text)
     text = re.sub(r"\s+", " ", text).strip(" .-")
-    return text or fallback
+    text = _truncate(text, MAX_STEM_BYTES)
+    # Windows silently drops a trailing dot or space, which would quietly merge
+    # two different parts into one file.
+    text = text.rstrip(" .")
+    if not text:
+        return fallback
+    if text.split(".")[0].upper() in _RESERVED:
+        text = f"{text}_"
+    return text
 
 
 def unique_filenames(names: list[str]) -> list[str]:

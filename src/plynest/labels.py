@@ -23,6 +23,13 @@ from .part import Part
 
 Path = tuple[Segment, ...]
 
+MAX_CANDIDATES = 20_000
+"""Cap on positions tried per attempt.
+
+The natural step is half the text height, which on a full-sheet part means
+millions of positions -- minutes of sorting for a label that was going to land
+in the corner anyway.  The step is widened to stay under this instead.""" 
+
 
 @dataclass
 class LabelPlacement:
@@ -70,10 +77,16 @@ def _corner_priority(corner: str, region: Polygon, w: float, h: float,
     if max_x < x0 or max_y < y0:
         return []
 
-    nx = max(1, int((max_x - x0) / step) + 1)
-    ny = max(1, int((max_y - y0) / step) + 1)
-    xs = sorted({min(x0 + i * step, max_x) for i in range(nx)} | {max_x})
-    ys = sorted({min(y0 + i * step, max_y) for i in range(ny)} | {max_y})
+    span_x, span_y = max(max_x - x0, 0.0), max(max_y - y0, 0.0)
+    nx = int(span_x / step) + 1
+    ny = int(span_y / step) + 1
+    if nx * ny > MAX_CANDIDATES:
+        step *= math.sqrt(nx * ny / MAX_CANDIDATES)
+        nx = int(span_x / step) + 1
+        ny = int(span_y / step) + 1
+    # The corner itself is always tried exactly, whatever the step works out to.
+    xs = sorted({min(x0 + i * step, max_x) for i in range(max(nx, 1))} | {x0, max_x})
+    ys = sorted({min(y0 + i * step, max_y) for i in range(max(ny, 1))} | {y0, max_y})
 
     if corner == "center":
         cx, cy = (x0 + max_x) / 2, (y0 + max_y) / 2

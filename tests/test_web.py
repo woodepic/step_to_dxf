@@ -149,3 +149,84 @@ def test_export_names_the_zip_for_what_it_contains(client, finished_run):
 
 def test_download_before_export_is_refused(client, finished_run):
     assert client.get("/api/run/unknown/download").status_code == 404
+
+
+# --- hostile and careless requests -----------------------------------------
+
+def test_unknown_ids_are_404_not_500(client):
+    for path in ("/api/run/nope", "/api/run/nope/layout", "/api/run/nope/export/status",
+                 "/api/run/nope/download"):
+        assert client.get(path).status_code == 404, path
+    assert client.post("/api/run/nope/export", json={"settings": {}}).status_code == 404
+
+
+def test_running_an_unknown_upload_is_404(client):
+    res = client.post("/api/run", json={"upload_id": "does-not-exist", "settings": {}})
+    assert res.status_code == 404
+
+
+def test_malformed_request_bodies_are_rejected(client):
+    assert client.post("/api/run", json={}).status_code == 422
+    assert client.post("/api/run", content=b"not json").status_code == 422
+
+
+def test_nonsense_settings_do_not_crash_the_run(client):
+    """Junk in the settings should fall back to defaults, not 500."""
+    with SAMPLE_STEP.open("rb") as fh:
+        upload_id = client.post(
+            "/api/upload", files={"file": (SAMPLE_STEP.name, fh)}
+        ).json()["upload_id"]
+    res = client.post("/api/run", json={
+        "upload_id": upload_id,
+        "settings": {"nest": {"kerf_mm": "wide", "attempts": None}, "bogus": 1},
+    })
+    assert res.status_code in (200, 400)
+
+
+def test_unknown_export_mode_is_refused(client, finished_run):
+    res = client.post(f"/api/run/{finished_run}/export",
+                      json={"settings": {"mode": "carrier_pigeon"}})
+    assert res.status_code == 400
+    status = client.get(f"/api/run/{finished_run}/export/status").json()
+    assert status["stage"] != "working", "a refused export must not leave the run busy"
+
+
+def test_upload_without_a_step_extension_is_refused(client):
+    assert client.post("/api/upload",
+                       files={"file": ("model.iges", b"x")}).status_code == 400
+    assert client.post("/api/upload",
+                       files={"file": ("noextension", b"x")}).status_code == 400
+
+
+def test_a_stp_extension_is_accepted(client):
+    res = client.post("/api/upload", files={"file": ("model.STP", b"not really step")})
+    assert res.status_code == 200
+
+
+def test_a_bad_step_file_fails_the_run_with_a_message(client):
+    upload_id = client.post(
+        "/api/upload", files={"file": ("junk.step", b"this is not a STEP file")}
+    ).json()["upload_id"]
+    run_id = client.post("/api/run", json={"upload_id": upload_id}).json()["run_id"]
+    for _ in range(200):
+        status = client.get(f"/api/run/{run_id}").json()
+        if status["stage"] in ("done", "error"):
+            break
+        time.sleep(0.1)
+    assert status["stage"] == "error"
+    assert status["error"] and "StepLoadError" in status["error"]
+
+
+def test_old_runs_are_evicted_so_the_disk_does_not_fill(client):
+    from plynest.web.app import MAX_RETAINED_RUNS, _runs
+
+    ids = []
+    for _ in range(MAX_RETAINED_RUNS + 3):
+        upload_id = client.post(
+            "/api/upload", files={"file": ("junk.step", b"nope")}
+        ).json()["upload_id"]
+        ids.append(client.post("/api/run", json={"upload_id": upload_id}).json()["run_id"])
+
+    assert len(_runs) <= MAX_RETAINED_RUNS + 2
+    assert client.get(f"/api/run/{ids[-1]}").status_code == 200
+    assert client.get(f"/api/run/{ids[0]}").status_code == 404

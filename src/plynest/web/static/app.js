@@ -29,7 +29,7 @@ const DEFAULTS_MM = {
   'sheet-w': 48 * MM_PER_IN, 'sheet-h': 96 * MM_PER_IN,
   'kerf': 6.35, 'keepout': 25.4,
   'label-h': 6.0, 'label-d': 1.0, 'label-margin': 6.0, 'label-clear': 1.5,
-  'ex-tool': 3.175,
+  'ex-tool': 0.762,
 };
 
 function decimalsFor(id) {
@@ -300,7 +300,7 @@ function exportSettings() {
     include_sheet_outline: $('ex-outline').checked,
     include_keepout: $('ex-keepout').checked,
     engrave_labels_in_step: $('ex-engrave').checked,
-    engrave_tool_mm: toMm(parseFloat($('ex-tool').value) || 3.175),
+    engrave_tool_mm: toMm(parseFloat($('ex-tool').value) || 0.03),
   };
 }
 

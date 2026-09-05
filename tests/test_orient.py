@@ -127,7 +127,7 @@ def test_two_sided_part_is_reported_not_silently_wrong():
 def test_non_plate_solid_is_rejected():
     a = analyse(as_loaded(plain_plate(50, 50, 50)), "Cube", part_id="t0")
     assert not a.ok
-    assert "plate" in " ".join(a.messages)
+    assert "not a sheet part" in " ".join(a.messages)
 
 
 def test_volume_is_conserved_by_flattening():

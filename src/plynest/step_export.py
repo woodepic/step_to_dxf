@@ -34,22 +34,26 @@ from .step_loader import LoadedSolid
 ENGRAVE_OVERSHOOT = 0.01
 """How far the engraving tool breaks the top surface, so the cut is clean."""
 
-ENGRAVE_QUAD_SEGS = 3
-"""Segments per quarter turn on the groove's round ends and corners."""
+ENGRAVE_QUAD_SEGS = 2
+"""Segments per quarter turn on the groove's round ends and corners.
 
-ENGRAVE_SIMPLIFY = 0.02
+A 0.03 in groove has a 0.38 mm cap; nobody is inspecting its facets, and every
+extra vertex is another face in the boolean."""
+
+ENGRAVE_SIMPLIFY = 0.04
 """Vertex-thinning tolerance (mm) applied to the groove outline."""
 
 
-def _engrave_tolerance(height_mm: float) -> float:
+def _engrave_tolerance(height_mm: float, width_mm: float) -> float:
     """Chord tolerance for flattening label curves into groove geometry.
 
     Solid text is expensive: every vertex of the groove outline becomes a face
-    of the cut, and each face costs roughly a hundred STEP entities.  A tenth of
-    a millimetre is invisible in a groove cut by a 3 mm bit but keeps a sheet's
-    file to tens of megabytes rather than hundreds.
+    of the cut, and each face costs roughly a hundred STEP entities.  This is a
+    representation of the engraving -- the cut itself comes from the DXF, which
+    keeps exact arcs -- so a fraction of the cap height is plenty.  Narrow
+    grooves get a proportionally finer tolerance so they do not look ragged.
     """
-    return max(0.1, height_mm / 40.0)
+    return max(0.08, min(height_mm / 24.0, width_mm / 3.0))
 
 
 class StepExportError(RuntimeError):
@@ -62,7 +66,7 @@ def _engraving_tools(placement: Placement, label: LabelPlacement | None,
     if label is None or not label.fitted or not settings.engrave_labels_in_step:
         return []
     width = max(settings.engrave_tool_mm, 1e-3)
-    tol = _engrave_tolerance(label.height)
+    tol = _engrave_tolerance(label.height, width)
     strokes = [
         LineString([(p.x, p.y) for p in chain])
         for chain in label.sampled(tol)
@@ -124,9 +128,15 @@ def build_sheet(sheet: Sheet, sources: dict[int, LoadedSolid],
         if source is None:
             raise StepExportError(f"{part.label}: original solid is no longer available")
         shape = posed_solid(placement, source)
-        tools = _engraving_tools(placement, labels.get(part.id), settings, label_depth_mm)
-        if tools:
-            shape = occ.cut_many(shape, tools)
+        try:
+            tools = _engraving_tools(placement, labels.get(part.id), settings, label_depth_mm)
+            if tools:
+                engraved = occ.cut_many(shape, tools)
+                # A boolean that collapses the part is worse than no engraving.
+                if occ.volume(engraved) > 0:
+                    shape = engraved
+        except Exception:
+            pass  # keep the part, lose only its engraving
         out.append((part.label, shape))
     return out
 

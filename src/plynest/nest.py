@@ -109,7 +109,7 @@ class _SheetPacker:
 
     def __init__(self, rect: tuple[float, float, float, float], gap: float, scan: str = "bl"):
         self.x0, self.y0, self.x1, self.y1 = rect
-        self.gap = gap
+        self.gap = max(0.0, gap)
         self.scan = scan
         self.capacity = (self.x1 - self.x0) * (self.y1 - self.y0)
         self.polys: list[Polygon] = []
@@ -403,15 +403,33 @@ def _consolidate(packers, assignments, variant_cache, scan) -> None:
 def _pack_group(parts: list[Part], thickness: float, settings: NestSettings,
                 start_index: int) -> tuple[list[Sheet], list[tuple[Part, str]]]:
     spec = settings.sheet
-    k = settings.edge_keepout_mm
+    # Clamp rather than trust: a negative kerf would let parts overlap and a
+    # negative keep-out would push them off the sheet.
+    k = max(0.0, settings.edge_keepout_mm)
     rect = (k, k, spec.width_mm - k, spec.height_mm - k)
     if rect[2] <= rect[0] or rect[3] <= rect[1]:
-        return [], [(p, "edge keep-out leaves no usable sheet area") for p in parts]
+        reason = (
+            f"a {spec.width_mm:.0f} x {spec.height_mm:.0f} mm sheet with a "
+            f"{k:.0f} mm keep-out has no usable area"
+        )
+        return [], [(p, reason) for p in parts]
 
     angles = ROTATION_ANGLES.get(settings.rotation, ROTATION_ANGLES["90"])
+
+    usable: list[Part] = []
+    unusable: list[tuple[Part, str]] = []
+    for part in parts:
+        if part.area <= _EPS or part.profile.to_polygon(ARC_CHORD_TOL).is_empty:
+            unusable.append((part, "outline encloses no area"))
+        else:
+            usable.append(part)
+    parts = usable
+
     variant_cache = {p.id: _variants(p, angles) for p in parts}
 
     best: tuple[tuple, list[list[Placement]], list] | None = None
+    if not parts:
+        return [], unusable
     for ordered in _orderings(parts, max(1, settings.attempts), settings.seed):
         for scan in ("bl", "lb"):
             packers, assignments, unplaced = _place_all(
@@ -427,6 +445,7 @@ def _pack_group(parts: list[Part], thickness: float, settings: NestSettings,
 
     assert best is not None
     _, assignments, unplaced = best
+    unplaced = list(unplaced) + unusable
     sheets = []
     for i, placements in enumerate(assignments):
         if not placements:

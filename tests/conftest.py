@@ -98,3 +98,75 @@ def plate_stepped_pocket(w=400.0, h=300.0, t=18.0):
     """Two pockets at different depths, one inside the other."""
     s = cut(box(w, h, t), box(200, 150, 4, at=(50, 50, t - 4)))
     return cut(s, box(80, 60, 9, at=(100, 90, t - 9)))
+
+
+# --- degenerate and awkward solids -----------------------------------------
+
+def sphere(r=50.0, at=(0.0, 0.0, 0.0)):
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
+
+    return BRepPrimAPI_MakeSphere(gp_Pnt(*at), r).Shape()
+
+
+def upright_cylinder(r=100.0, h=18.0):
+    return cylinder(r, h)
+
+
+def wedge(dx=200.0, dy=100.0, dz=18.0, ltx=80.0):
+    """A box with one face sloped: non-vertical walls."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeWedge
+
+    return BRepPrimAPI_MakeWedge(dx, dz, dy, ltx).Shape()
+
+
+def plate_with_chamfered_top(w=300.0, h=200.0, t=18.0, c=4.0):
+    """Plate whose top edge is chamfered all round."""
+    from OCP.BRepFilletAPI import BRepFilletAPI_MakeChamfer
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+
+    from plynest import occ_utils as occ
+
+    solid = box(w, h, t)
+    maker = BRepFilletAPI_MakeChamfer(solid)
+    top = None
+    for face in occ.faces(solid):
+        plane = occ.face_plane(face)
+        if plane and abs(plane[0][2] - 1.0) < 1e-6:
+            top = face
+            break
+    ex = TopExp_Explorer(top, TopAbs_EDGE)
+    while ex.More():
+        maker.Add(c, c, TopoDS.Edge_s(ex.Current()), top)
+        ex.Next()
+    maker.Build()
+    return maker.Shape()
+
+
+def two_separate_bodies(w=400.0, h=300.0, t=18.0):
+    """Two disjoint plates in one shape: a valid solid is connected, so this
+    stays a compound and should load as two parts, not one broken one."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+
+    op = BRepAlgoAPI_Fuse(box(w, h, t), box(w, h, t, at=(w * 2, 0, 0)))
+    op.Build()
+    return op.Shape()
+
+
+def bar(a=20.0, b=20.0, length=400.0):
+    """Two small dimensions and one long one: not a sheet part."""
+    return box(a, b, length)
+
+
+def round_plate(r=150.0, t=18.0):
+    return cylinder(r, t)
+
+
+def plate_with_slot_to_edge(w=400.0, h=300.0, t=18.0):
+    """A through slot that breaks out of the outline -- a C shape."""
+    return cut(box(w, h, t), box(100, 120, t * 3, at=(150, -10, -t)))
+
+
+def tiny_plate(w=6.0, h=4.0, t=1.0):
+    return box(w, h, t)

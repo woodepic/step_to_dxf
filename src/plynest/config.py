@@ -91,8 +91,8 @@ class ExportSettings:
     engrave_labels_in_step: bool = True
     """Cut the label strokes into the solids rather than only drawing them."""
 
-    engrave_tool_mm: float = 3.175
-    """Width of the engraved groove in a STEP export (a 1/8 in bit)."""
+    engrave_tool_mm: float = 0.762
+    """Width of the engraved groove in a STEP export (0.03 in)."""
 
 
 @dataclass

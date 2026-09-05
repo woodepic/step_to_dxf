@@ -16,6 +16,7 @@ from .dxf_export import export
 from .pipeline import run
 from .step_export import export_step
 from .naming import sheet_name
+from .step_loader import StepLoadError
 from .units import from_mm, to_mm
 
 
@@ -42,8 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="one DXF per sheet (layers per depth), one DXF per part "
                         "(ignores the layout), or one STEP per sheet with the "
                         "parts re-posed into the layout and the labels engraved")
-    p.add_argument("--engrave-tool", type=float, default=0.125,
-                   help="groove width for STEP engraving (default: 0.125 in)")
+    p.add_argument("--engrave-tool", type=float, default=0.03,
+                   help="groove width for STEP engraving (default: 0.03 in)")
     p.add_argument("--no-engrave-in-step", action="store_true",
                    help="re-pose the solids but do not cut the labels into them")
     p.add_argument("--keepout-layer", action="store_true",
@@ -63,9 +64,21 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+EXIT_OK = 0
+EXIT_UNPLACED = 1
+EXIT_BAD_INPUT = 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     unit = args.unit
+
+    if args.kerf < 0 or args.edge_keepout < 0:
+        print("Kerf and edge keep-out cannot be negative.", file=sys.stderr)
+        return EXIT_BAD_INPUT
+    if args.sheet_width <= 0 or args.sheet_height <= 0:
+        print("Sheet width and height must be positive.", file=sys.stderr)
+        return EXIT_BAD_INPUT
 
     settings = RunSettings(
         nest=NestSettings(
@@ -96,7 +109,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"  [{frac * 100:5.1f}%] {stage}", file=sys.stderr)
 
-    job = run(args.step, settings, progress)
+    try:
+        job = run(args.step, settings, progress)
+    except StepLoadError as exc:
+        # A bad input file is the user's problem to fix, not a traceback.
+        print(f"Could not read {args.step}: {exc}", file=sys.stderr)
+        return EXIT_BAD_INPUT
+
     if settings.export.mode == "step_per_sheet":
         paths = export_step(
             job.result, settings.export, args.out, job.sources,
@@ -127,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ... and {len(job.warnings) - 20} more")
     kind = "STEP" if settings.export.mode == "step_per_sheet" else "DXF"
     print(f"\nWrote {len(paths)} {kind} file(s) to {Path(args.out).resolve()}")
-    return 1 if job.result.unplaced else 0
+    return EXIT_UNPLACED if job.result.unplaced else EXIT_OK
 
 
 if __name__ == "__main__":

@@ -33,6 +33,11 @@ WORK_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
+MAX_RETAINED_RUNS = 8
+"""Runs kept on disk and in memory.  A STEP export is tens of megabytes and the
+uploads are megabytes each, so an all-day session would otherwise fill the
+disk."""
+
 
 @dataclass
 class RunState:
@@ -57,6 +62,30 @@ class RunState:
 app = FastAPI(title="plynest", version="0.1.0")
 _uploads: dict[str, Path] = {}
 _runs: dict[str, RunState] = {}
+_order: list[str] = []
+_registry_lock = threading.Lock()
+
+
+def _remember(run_id: str, state: RunState) -> None:
+    """Track a run, discarding the oldest once we are holding too many."""
+    with _registry_lock:
+        _runs[run_id] = state
+        _order.append(run_id)
+        stale = _order[:-MAX_RETAINED_RUNS]
+        del _order[:-MAX_RETAINED_RUNS]
+    for old in stale:
+        dead = _runs.pop(old, None)
+        shutil.rmtree(WORK_DIR / old, ignore_errors=True)
+        if dead is not None and dead.source is not None:
+            # Drop the upload too, unless a surviving run still points at it.
+            still_used = any(
+                r.source == dead.source for r in _runs.values() if r is not dead
+            )
+            if not still_used:
+                shutil.rmtree(dead.source.parent, ignore_errors=True)
+                for key, path in list(_uploads.items()):
+                    if path == dead.source:
+                        _uploads.pop(key, None)
 
 
 class RunRequest(BaseModel):
@@ -120,9 +149,14 @@ def start_run(req: RunRequest) -> dict[str, Any]:
     if source is None or not source.exists():
         raise HTTPException(404, "Upload not found; please upload the file again")
 
+    try:
+        settings = RunSettings.from_dict(req.settings)
+    except Exception as exc:
+        raise HTTPException(400, f"Could not read those settings: {exc}") from exc
+
     run_id = uuid.uuid4().hex[:12]
-    state = RunState(run_id=run_id, source=source, settings=RunSettings.from_dict(req.settings))
-    _runs[run_id] = state
+    state = RunState(run_id=run_id, source=source, settings=settings)
+    _remember(run_id, state)
     threading.Thread(target=_worker, args=(state,), daemon=True).start()
     return {"run_id": run_id}
 
@@ -237,10 +271,19 @@ def export_run(run_id: str, req: ExportRequest) -> dict[str, Any]:
         state.export_zip = None
 
     defaults = ExportSettings()
-    export_settings = ExportSettings(**{
-        **defaults.__dict__,
-        **{k: v for k, v in req.settings.items() if k in defaults.__dict__},
-    })
+    try:
+        export_settings = ExportSettings(**{
+            **defaults.__dict__,
+            **{k: v for k, v in req.settings.items() if k in defaults.__dict__},
+        })
+        if export_settings.mode not in (
+            "dxf_per_sheet", "dxf_per_part", "step_per_sheet"
+        ):
+            raise ValueError(f"unknown export mode {export_settings.mode!r}")
+    except Exception as exc:
+        with state.lock:
+            state.export_stage = "idle"
+        raise HTTPException(400, f"Bad export settings: {exc}") from exc
     threading.Thread(target=_export_worker, args=(state, export_settings), daemon=True).start()
     return {"started": True}
 
