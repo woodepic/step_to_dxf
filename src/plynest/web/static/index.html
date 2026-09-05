@@ -4,10 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>plynest — STEP to sheet DXF</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="icon-512.png">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <header>
+  <img src="favicon.png" alt="" class="logo">
   <h1>plynest</h1>
   <p class="tag">STEP assembly &rarr; nested 4&times;8 plywood sheets &rarr; CNC-ready DXF</p>
 </header>
@@ -104,9 +107,9 @@
     </section>
 
     <section class="card" id="export-card" hidden>
-      <h2>3 &middot; Export DXF</h2>
+      <h2>3 &middot; Export</h2>
       <div class="row">
-        <label>DXF units
+        <label>Units
           <select id="ex-unit">
             <option value="in" selected>inches</option>
             <option value="mm">millimetres</option>
@@ -114,18 +117,29 @@
         </label>
       </div>
       <div class="row">
-        <label>File layout
+        <label>What to export
           <select id="ex-mode">
-            <option value="per_sheet" selected>One DXF per sheet (a layer per depth)</option>
-            <option value="per_depth">One DXF per sheet, per depth</option>
-            <option value="single_file">One DXF containing every sheet</option>
+            <option value="dxf_per_sheet" selected>DXF &mdash; one per sheet, a layer per depth</option>
+            <option value="dxf_per_part">DXF &mdash; one per part (ignores the layout)</option>
+            <option value="step_per_sheet">STEP &mdash; one per sheet, parts re-posed into the layout</option>
           </select>
         </label>
       </div>
       <label class="inline"><input type="checkbox" id="ex-labels" checked> Include engraved labels</label>
-      <label class="inline"><input type="checkbox" id="ex-outline" checked> Include sheet outline</label>
-      <label class="inline"><input type="checkbox" id="ex-keepout" checked> Include keep-out rectangle</label>
+      <div id="ex-dxf-opts">
+        <label class="inline"><input type="checkbox" id="ex-outline" checked> Include sheet outline</label>
+        <label class="inline"><input type="checkbox" id="ex-keepout"> Include keep-out rectangle</label>
+      </div>
+      <div id="ex-step-opts" hidden>
+        <label class="inline"><input type="checkbox" id="ex-engrave" checked> Cut the labels into the solids</label>
+        <label>Engraving tool width <span class="q" title="Width of the engraved groove cut into the STEP solids.">?</span>
+          <input type="number" id="ex-tool" step="0.001"></label>
+        <p class="hint">Takes the original solids from your STEP file and moves them
+          into the nested layout &mdash; nothing is re-modelled, so every hole and
+          rabbet survives exactly.</p>
+      </div>
       <button id="export" class="primary">Build &amp; download .zip</button>
+      <div id="ex-progress" hidden><div id="ex-bar"></div><span id="ex-stage"></span></div>
       <p class="hint" id="export-info"></p>
     </section>
   </aside>

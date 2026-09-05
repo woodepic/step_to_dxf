@@ -211,6 +211,38 @@ class Arc:
     def length(self) -> float:
         return abs(self.sweep()) * self.radius
 
+    def split(self, pieces: int = 2) -> list["Arc"]:
+        """Divide the sweep into ``pieces`` arcs that chain end to start."""
+        if pieces < 2:
+            return [self]
+        sweep = self.sweep()
+        step = sweep / pieces
+        out = []
+        for i in range(pieces):
+            a0 = self.start_angle + step * i
+            a1 = a0 + step
+            out.append(Arc(self.center, self.radius, a0 % TAU, a1 % TAU,
+                           ccw=step > 0, full=False))
+        return out
+
+
+def split_wide_arcs(segments: Iterable["Segment"]) -> list["Segment"]:
+    """Break arcs sweeping more than 180 degrees into halves.
+
+    A polyline bulge is tan(sweep/4), which blows up towards a full turn and
+    exceeds 1 for any arc over a half turn.  Some CAM post-processors mishandle
+    those, so keep every emitted arc at a half turn or less.
+    """
+    out: list[Segment] = []
+    for seg in segments:
+        if isinstance(seg, Arc):
+            sweep = abs(seg.sweep())
+            if sweep > math.pi + 1e-9:
+                out.extend(seg.split(int(math.ceil(sweep / math.pi))))
+                continue
+        out.append(seg)
+    return out
+
 
 Segment = Line | Arc
 

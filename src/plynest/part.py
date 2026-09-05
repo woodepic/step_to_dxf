@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .geom2d import ARC_CHORD_TOL, Region
 
@@ -39,6 +40,13 @@ class Part:
     """True if the part was turned over relative to its pose in the assembly."""
 
     source_index: int = 0
+
+    transform: Any = None
+    """gp_Trsf taking the original STEP solid into this part's local frame.
+
+    Applying it to the source solid reproduces the flattened pose exactly, which
+    is what lets a STEP export re-pose the real geometry instead of re-modelling
+    it from the 2D profile."""
 
     def bounds(self) -> tuple[float, float, float, float]:
         return self.profile.bounds()

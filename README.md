@@ -7,8 +7,12 @@ uppermost, flattens the part to a 2D profile with a layer per cut depth, nests
 everything onto sheets of the right stock thickness, engraves each part's name
 somewhere the router can actually reach, and writes the DXF.
 
+It can also hand the layout back as STEP: the original solids, re-posed into the
+nest with the labels cut into them.
+
 ```
 STEP assembly ──▶ orient & flatten ──▶ label ──▶ nest ──▶ DXF
+                                                       └─▶ STEP
 ```
 
 ---
@@ -107,6 +111,11 @@ would force the router to V-carve or pocket the counter of every letter; a
 single-stroke font is one pass of the bit down the centre of each stroke, which
 is what a ¼″ part label wants.
 
+Every curve in it is a real circular arc, and every stroke is one continuous
+chain — the tests assert both. That matters: an arc reaches the DXF as an arc,
+so letters stay smooth at any zoom instead of showing facets, and a stroke with
+a gap in it would draw as a chord straight through the middle of the letter.
+
 Placement walks inward from the chosen corner (bottom-right by default) until
 the whole text box sits on solid top surface — inside the outline, clear of
 every pocket, rabbet and through hole, and inset from the edge by a margin. If
@@ -123,25 +132,43 @@ Labels are toggleable in the viewer and at export.
 
 ## Output
 
-One layer per cut depth, so each depth can be a separate toolpath:
+Three things you can export, all as a zip with a plain-text layout report:
+
+| Mode | What you get |
+|---|---|
+| **DXF, one per sheet** | `Sheet 1, 0.75 in.dxf` — the nested layout, a layer per cut depth |
+| **DXF, one per part** | `AC4-DA2-Front Side.dxf` — each part at the origin; ignores the layout |
+| **STEP, one per sheet** | `Sheet 1, 0.75 in.step` — the real solids re-posed into the nest |
+
+Layer names say how deep to cut, measured down from the part's top face:
 
 | Layer | Contents |
 |---|---|
-| `CUT_THROUGH_0p75` | outlines and through holes, cut to full thickness |
-| `POCKET_0p25` | pocket floors at 0.25″ deep |
-| `ENGRAVE_0p04` | label strokes |
-| `SHEET_OUTLINE`, `EDGE_KEEPOUT` | reference only |
+| `CUT THROUGH 0.75 in deep` | outlines and through holes, cut to full thickness |
+| `POCKET 0.25 in deep` | pocket floors a quarter inch down |
+| `ENGRAVE 0.04 in deep` | label strokes |
+| `SHEET OUTLINE`, `EDGE KEEP-OUT` | reference only; keep-out is off by default |
 
-Three file layouts:
-
-- **One DXF per sheet** — every depth on its own layer (default)
-- **One DXF per sheet, per depth** — one file per toolpath
-- **One DXF for everything** — all sheets side by side in a single file
+Nothing is ever drawn on layer `0`, and `Defpoints` is not written. (Layer `0`
+still exists — the DXF spec requires it.)
 
 Closed profiles are written as single closed `LWPOLYLINE`s carrying bulge
-factors, so arcs survive into CAM. Units are inches or millimetres, with
-`$INSUNITS` set to match. The export zip also contains a plain-text layout
-report listing every part, its size, its rotation and whether it was flipped.
+factors, so arcs survive into CAM as arcs; no polyline arc exceeds a half turn,
+which keeps fussy post-processors happy. Units are inches or millimetres, with
+`$INSUNITS` set to match.
+
+### The STEP mode
+
+This is the "rearrange my assembly" mode. It takes the **original solids** from
+your input file, applies the pose the orienter chose and the position the nester
+chose, and cuts the engraved label into the top face. Nothing is re-modelled
+from the 2D profile, so every fillet, chamfer and hole in the source survives
+exactly — the tests assert the volume is unchanged to 1 part in 10⁹.
+
+Solid text is expensive: every vertex of a groove becomes a face, and each face
+costs about a hundred STEP entities. The sample assembly comes to ~130 MB across
+ten sheets, or ~23 MB zipped. Turn off "cut the labels into the solids" and the
+same export is a few hundred KB.
 
 ---
 
@@ -165,10 +192,13 @@ plynest STEP [-o OUT] [--unit {in,mm}]
              [--sheet-width W] [--sheet-height H]
              [--kerf K] [--edge-keepout E]
              [--rotation {none,180,90,free}] [--attempts N]
-             [--mode {per_sheet,per_depth,single_file}]
+             [--mode {dxf_per_sheet,dxf_per_part,step_per_sheet}]
              [--no-labels] [--label-height H] [--label-depth D]
              [--label-corner ...] [--label-style ...]
+             [--keepout-layer] [--engrave-tool W] [--no-engrave-in-step]
 ```
+
+The CLI writes loose files into `-o`; the web UI zips them.
 
 All lengths are in whatever `--unit` says. Exit status is non-zero if any part
 could not be placed.
@@ -178,7 +208,7 @@ could not be placed.
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest        # 119 tests, ~8 s
+./venv/bin/python -m pytest        # 203 tests, ~12 s
 ```
 
 The suite covers geometry transforms and exact arc maths, font coverage,
@@ -194,7 +224,11 @@ for trusting a cut file:
 - everything is inside the edge keep-out, and no sheet mixes stock thickness;
 - no label crosses a pocket or leaves its part;
 - exporting and **re-reading the DXF** reproduces every part at the right size
-  and position.
+  and position;
+- exporting and **re-reading the STEP** puts every solid where the nest said,
+  with its volume unchanged;
+- the HTTP endpoints the browser calls, including the one that reshapes every
+  part for the preview.
 
 Tests needing the sample assembly skip cleanly if it is absent.
 
@@ -209,10 +243,12 @@ src/plynest/
   profile.py       planar faces → 2D contours, arcs kept symbolic
   geom2d.py        points, lines, arcs, contours, regions; exact area and bounds
   part.py          the sheet-part model
-  font.py          built-in single-stroke engraving font
+  font.py          built-in single-stroke engraving font, arcs and all
   labels.py        where a label can legally go
   nest.py          the packer
+  naming.py        readable file and layer names
   dxf_export.py    DXF writing
+  step_export.py   re-posing the original solids, engraving included
   pipeline.py      end to end
   cli.py           command line
   web/             FastAPI back end + browser UI

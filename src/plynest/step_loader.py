@@ -60,6 +60,19 @@ def _label_name(label: TDF_Label) -> str | None:
     return None
 
 
+# Names OpenCASCADE invents when a shape carries none of its own.  A STEP file
+# that names the product but not the solid inside it -- including one this
+# program writes -- would otherwise come back as a pile of parts called "SOLID".
+_PLACEHOLDER_NAMES = {
+    "solid", "compound", "compsolid", "shell", "face", "shape",
+    "unnamed", "", "product",
+}
+
+
+def _is_placeholder(name: str | None) -> bool:
+    return name is None or name.strip().lower() in _PLACEHOLDER_NAMES
+
+
 def _dedupe_path(path: tuple[str, ...]) -> tuple[str, ...]:
     """Collapse the 'instance name == referenced product name' duplication.
 
@@ -120,7 +133,9 @@ def load_step(path: str | Path) -> list[LoadedSolid]:
         if shape.IsNull():
             return
         placed = shape.Moved(loc)
-        full_path = _dedupe_path(path_so_far + (name,))
+        # Keep the enclosing product's name when the solid itself has none.
+        parts = path_so_far + (name,) if not _is_placeholder(name) else path_so_far
+        full_path = _dedupe_path(parts) or ("Unnamed",)
         explorer = TopExp_Explorer(placed, TopAbs_SOLID)
         found = 0
         while explorer.More():

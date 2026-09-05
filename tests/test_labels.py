@@ -1,6 +1,8 @@
 """Engraved labels must land on solid top surface, never over a cut feature."""
 from __future__ import annotations
 
+import math
+
 import pytest
 from shapely.geometry import LineString, Point as ShPoint
 
@@ -23,7 +25,7 @@ def flatten(shape):
 
 
 def stroke_geoms(placement):
-    return [LineString([(p.x, p.y) for p in s]) for s in placement.strokes if len(s) >= 2]
+    return [LineString([(p.x, p.y) for p in s]) for s in placement.sampled() if len(s) >= 2]
 
 
 def test_label_sits_inside_the_part():
@@ -92,7 +94,7 @@ def test_label_rotates_when_the_part_is_narrow():
     assert placement.fitted
     assert placement.angle == 90.0
     assert part.profile.to_polygon().contains(
-        LineString([(p.x, p.y) for p in placement.strokes[0]])
+        LineString([(p.x, p.y) for p in placement.sampled()[0]])
     )
 
 
@@ -110,7 +112,7 @@ def test_impossible_label_is_reported_not_silently_dropped():
     part = flatten(plain_plate(30, 20, 18))
     placement = place_label(part, "THIS NAME IS FAR TOO LONG TO ENGRAVE HERE", LabelSettings())
     assert not placement.fitted
-    assert placement.strokes == ()
+    assert placement.paths == ()
     assert "does not fit" in placement.message
 
 
@@ -126,6 +128,26 @@ def test_margin_keeps_the_text_off_the_edge():
     x0, y0, x1, y1 = placement.bounds()
     assert x0 >= 25.0 - 1e-6 and y0 >= 25.0 - 1e-6
     assert x1 <= 400 - 25.0 + 1e-6 and y1 <= 300 - 25.0 + 1e-6
+
+
+def test_placed_label_keeps_its_arcs():
+    """Curves must survive placement, or the DXF gets a faceted chord chain."""
+    from plynest.geom2d import Arc
+
+    part = flatten(plain_plate(400, 300, 18))
+    placement = place_label(part, "AC4/DA2/FLOOR", LabelSettings())
+    arcs = [s for path in placement.paths for s in path if isinstance(s, Arc)]
+    assert arcs, "letters with bowls should place real arcs"
+    for arc in arcs:
+        assert arc.radius > 0 and math.isfinite(arc.sweep())
+
+
+def test_placed_label_paths_are_continuous():
+    part = flatten(plain_plate(400, 300, 18))
+    placement = place_label(part, "AC4/DA2/FLOOR", LabelSettings())
+    for path in placement.paths:
+        for a, b in zip(path, path[1:]):
+            assert a.end.dist(b.start) < 1e-6, "a stroke is broken by a gap"
 
 
 def test_allowed_region_excludes_pockets():

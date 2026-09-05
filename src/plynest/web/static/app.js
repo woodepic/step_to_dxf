@@ -23,17 +23,18 @@ const fmt = (mm, dp) => fromMm(mm).toFixed(dp === undefined ? (state.unit === 'i
 
 /* Fields that hold a length, so a unit switch can rewrite them all. */
 const LENGTH_FIELDS = ['sheet-w', 'sheet-h', 'kerf', 'keepout', 'label-h', 'label-d',
-                       'label-margin', 'label-clear'];
+                       'label-margin', 'label-clear', 'ex-tool'];
 
 const DEFAULTS_MM = {
   'sheet-w': 48 * MM_PER_IN, 'sheet-h': 96 * MM_PER_IN,
   'kerf': 6.35, 'keepout': 25.4,
   'label-h': 6.0, 'label-d': 1.0, 'label-margin': 6.0, 'label-clear': 1.5,
+  'ex-tool': 3.175,
 };
 
 function decimalsFor(id) {
-  if (state.unit === 'mm') return ['kerf', 'label-d', 'label-clear'].includes(id) ? 2 : 1;
-  return ['label-d', 'kerf'].includes(id) ? 4 : 3;
+  if (state.unit === 'mm') return ['kerf', 'label-d', 'label-clear', 'ex-tool'].includes(id) ? 2 : 1;
+  return ['label-d', 'kerf', 'ex-tool'].includes(id) ? 4 : 3;
 }
 
 function writeLengths(valuesMm) {
@@ -291,26 +292,68 @@ const sheet_count = () => state.layout.sheets.length;
 })();
 
 /* ---------- export ---------------------------------------------------- */
-async function doExport() {
-  const info = $('export-info');
-  info.className = 'hint';
-  info.textContent = 'Writing DXF…';
-  const settings = {
+function exportSettings() {
+  return {
     unit: $('ex-unit').value,
     mode: $('ex-mode').value,
     include_labels: $('ex-labels').checked,
     include_sheet_outline: $('ex-outline').checked,
     include_keepout: $('ex-keepout').checked,
+    engrave_labels_in_step: $('ex-engrave').checked,
+    engrave_tool_mm: toMm(parseFloat($('ex-tool').value) || 3.175),
   };
+}
+
+async function doExport() {
+  const info = $('export-info');
+  info.className = 'hint';
+  info.textContent = '';
+  $('export').disabled = true;
+  $('ex-progress').hidden = false;
+  setExportProgress('Starting…', 0.02);
+
   const res = await fetch(`/api/run/${state.runId}/export`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ settings }),
+    body: JSON.stringify({ settings: exportSettings() }),
   });
-  const data = await res.json();
-  if (!res.ok) { info.className = 'hint err'; info.textContent = data.detail; return; }
-  info.textContent = `${data.files.length} file(s) ready — downloading ${data.zip}`;
+  if (!res.ok) {
+    const data = await res.json();
+    exportFailed(data.detail || 'Export could not start');
+    return;
+  }
+  pollExport();
+}
+
+function setExportProgress(stage, frac) {
+  $('ex-bar').style.width = `${Math.round(frac * 100)}%`;
+  $('ex-stage').textContent = stage;
+  $('ex-stage').style.color = 'var(--dim)';
+}
+
+function exportFailed(message) {
+  setExportProgress(message, 1);
+  $('ex-stage').style.color = 'var(--cut)';
+  $('export').disabled = false;
+}
+
+async function pollExport() {
+  const data = await (await fetch(`/api/run/${state.runId}/export/status`)).json();
+  if (data.stage === 'error') { exportFailed(data.error); return; }
+  setExportProgress(data.stage, data.progress);
+  if (data.stage !== 'done') { setTimeout(pollExport, 400); return; }
+
+  $('export').disabled = false;
+  $('ex-progress').hidden = true;
+  $('export-info').textContent = `${data.files.length} file(s) — downloading ${data.zip}`;
   location.href = data.download;
+}
+
+function syncExportMode() {
+  const step = $('ex-mode').value === 'step_per_sheet';
+  const perPart = $('ex-mode').value === 'dxf_per_part';
+  $('ex-step-opts').hidden = !step;
+  $('ex-dxf-opts').hidden = step || perPart;
 }
 
 /* ---------- warnings -------------------------------------------------- */
@@ -343,6 +386,8 @@ function showWarnings(list) {
   $('unit').onchange = (e) => { setUnit(e.target.value); $('ex-unit').value = e.target.value; };
   $('run').onclick = startRun;
   $('export').onclick = doExport;
+  $('ex-mode').onchange = syncExportMode;
+  syncExportMode();
   $('fit').onclick = fitView;
   $('warn-close').onclick = () => { $('warnings').hidden = true; };
   $('labels-on').onchange = (e) => { $('label-opts').style.opacity = e.target.checked ? 1 : .45; };

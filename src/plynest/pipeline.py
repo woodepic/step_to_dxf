@@ -27,6 +27,9 @@ class Job:
     warnings: list[str] = field(default_factory=list)
     source_name: str = ""
 
+    sources: dict[int, LoadedSolid] = field(default_factory=dict)
+    """The original solids, kept so a STEP export can re-pose the real geometry."""
+
     def summary(self) -> dict:
         thick = Counter(round(p.thickness, 2) for p in self.parts)
         return {
@@ -114,4 +117,5 @@ def run(step_path: str | Path, settings: RunSettings,
         skipped=skipped,
         warnings=warnings,
         source_name=step_path.name,
+        sources={s.index: s for s in solids},
     )

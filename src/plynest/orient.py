@@ -117,7 +117,9 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
         return PartAnalysis(None, False, ("no planar faces; not a sheet part",),
                             solid.path, solid.index)
 
-    aligned = occ.transform_shape(shape, occ.align_trsf(axis))
+    align = occ.align_trsf(axis)
+    total = align
+    aligned = occ.transform_shape(shape, align)
     xmin, ymin, zmin, xmax, ymax, zmax = occ.bbox(aligned)
     thickness = zmax - zmin
     in_plane = max(xmax - xmin, ymax - ymin)
@@ -130,12 +132,16 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
 
     # Drop to z=0 and decide which way up.  Compare undercut area for the part
     # as-is against the part turned over; the machinable pose has none.
-    aligned = occ.transform_shape(aligned, occ.translation(0, 0, -zmin))
+    drop = occ.translation(0, 0, -zmin)
+    total = drop.Multiplied(total)
+    aligned = occ.transform_shape(aligned, drop)
     horiz = _horizontals(aligned)
     as_is = _undercut_area(horiz, 0.0)
-    flipped_shape = occ.transform_shape(aligned, occ.rotation_x180())
+    turn = occ.rotation_x180()
+    flipped_shape = occ.transform_shape(aligned, turn)
     fz = occ.bbox(flipped_shape)[2]
-    flipped_shape = occ.transform_shape(flipped_shape, occ.translation(0, 0, -fz))
+    re_drop = occ.translation(0, 0, -fz)
+    flipped_shape = occ.transform_shape(flipped_shape, re_drop)
     flipped_horiz = _horizontals(flipped_shape)
     as_flipped = _undercut_area(flipped_horiz, 0.0)
 
@@ -154,6 +160,7 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
     if flipped:
         aligned = flipped_shape
         horiz = flipped_horiz
+        total = re_drop.Multiplied(turn.Multiplied(total))
 
     bad_walls = _non_vertical_walls(aligned)
     if bad_walls > 1.0:
@@ -186,7 +193,9 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
 
     yaw = in_plane_alignment_angle([b.face for b in bottoms])
     if abs(yaw) > 1e-9:
-        aligned = occ.transform_shape(aligned, occ.rotation_z(yaw))
+        spin = occ.rotation_z(yaw)
+        total = spin.Multiplied(total)
+        aligned = occ.transform_shape(aligned, spin)
         horiz = _horizontals(aligned)
         levels = _levels(horiz)
         if levels is None:
@@ -232,11 +241,14 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
 
     pockets.sort(key=lambda p: p.depth)
 
-    # Finally slide everything so the outline's bounding box starts at (0, 0).
+    # Finally slide everything so the outline's bounding box starts at (0, 0)
+    # and the underside sits on z = 0.
     ox, oy, _, _ = profile.bounds()
     if abs(ox) > 1e-12 or abs(oy) > 1e-12:
         profile = profile.transformed(0.0, -ox, -oy)
         pockets = [Pocket(pk.depth, pk.region.transformed(0.0, -ox, -oy)) for pk in pockets]
+    settle = occ.translation(-ox, -oy, -z_bottom)
+    total = settle.Multiplied(total)
 
     part = Part(
         id=part_id,
@@ -248,5 +260,6 @@ def analyse(solid: LoadedSolid, label: str, *, part_id: str) -> PartAnalysis:
         warnings=tuple(messages),
         flipped=flipped,
         source_index=solid.index,
+        transform=total,
     )
     return PartAnalysis(part, True, tuple(messages), solid.path, solid.index)

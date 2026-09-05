@@ -22,7 +22,9 @@ from pydantic import BaseModel, Field
 from ..config import ExportSettings, RunSettings
 from ..dxf_export import export
 from ..geom2d import ARC_CHORD_TOL
+from ..naming import sheet_name
 from ..pipeline import Job, run as run_pipeline
+from ..step_export import export_step
 from ..units import from_mm
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -42,6 +44,14 @@ class RunState:
     settings: RunSettings | None = None
     source: Path | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # Export runs on its own thread too: engraving labels into 100+ solids for a
+    # STEP export takes long enough that a synchronous request would look hung.
+    export_stage: str = "idle"
+    export_progress: float = 0.0
+    export_error: str | None = None
+    export_files: list[str] = field(default_factory=list)
+    export_zip: str | None = None
 
 
 app = FastAPI(title="plynest", version="0.1.0")
@@ -183,13 +193,9 @@ def layout(run_id: str) -> dict[str, Any]:
                 })
             placed_label = job.labels.get(part.id)
             if placed_label and placed_label.fitted:
-                import math
-
-                ca, sa = math.cos(ang), math.sin(ang)
                 entry["label_strokes"] = [
-                    [[round(p.x * ca - p.y * sa + dx, 3), round(p.x * sa + p.y * ca + dy, 3)]
-                     for p in stroke]
-                    for stroke in placed_label.strokes
+                    _ring(chain)
+                    for chain in placed_label.transformed(ang, dx, dy).sampled(ARC_CHORD_TOL)
                 ]
             parts.append(entry)
 
@@ -220,41 +226,104 @@ def export_run(run_id: str, req: ExportRequest) -> dict[str, Any]:
     if state is None:
         raise HTTPException(404, "Unknown run")
     with state.lock:
-        job = state.job
-        settings = state.settings
-    if job is None:
-        raise HTTPException(409, "Run is not finished")
-    assert settings is not None
+        if state.job is None:
+            raise HTTPException(409, "Run is not finished")
+        if state.export_stage == "working":
+            raise HTTPException(409, "An export is already running")
+        state.export_stage = "working"
+        state.export_progress = 0.0
+        state.export_error = None
+        state.export_files = []
+        state.export_zip = None
 
+    defaults = ExportSettings()
     export_settings = ExportSettings(**{
-        **ExportSettings().__dict__,
-        **{k: v for k, v in req.settings.items() if k in ExportSettings().__dict__},
+        **defaults.__dict__,
+        **{k: v for k, v in req.settings.items() if k in defaults.__dict__},
     })
+    threading.Thread(target=_export_worker, args=(state, export_settings), daemon=True).start()
+    return {"started": True}
 
-    out_dir = WORK_DIR / run_id / "dxf"
-    if out_dir.exists():
-        shutil.rmtree(out_dir)
-    stem = Path(job.source_name).stem
-    paths = export(
-        job.result,
-        export_settings,
-        out_dir,
-        labels=job.labels if export_settings.include_labels else None,
-        label_depth_mm=settings.labels.depth_mm,
-        job_name=stem,
-    )
 
-    archive = WORK_DIR / run_id / f"{stem}_dxf.zip"
-    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        for path in paths:
-            zf.write(path, path.name)
-        zf.writestr("layout_report.txt", _report(job, export_settings))
+def _export_worker(state: RunState, export_settings: ExportSettings) -> None:
+    try:
+        with state.lock:
+            job = state.job
+            settings = state.settings
+        assert job is not None and settings is not None
 
-    return {
-        "files": [p.name for p in paths],
-        "zip": archive.name,
-        "download": f"/api/run/{run_id}/download",
-    }
+        out_dir = WORK_DIR / state.run_id / "export"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+
+        def note(stage: str, frac: float) -> None:
+            with state.lock:
+                state.export_stage = stage
+                state.export_progress = frac
+
+        if export_settings.mode == "step_per_sheet":
+            note("Rebuilding solids and engraving labels", 0.05)
+            paths = export_step(
+                job.result, export_settings, out_dir, job.sources,
+                labels=job.labels if export_settings.include_labels else None,
+                label_depth_mm=settings.labels.depth_mm,
+                sheet_namer=lambda sh: sheet_name(sh.index, sh.thickness, export_settings.unit),
+                progress=lambda done, total: note(
+                    f"Writing sheet {done} of {total}", 0.05 + 0.85 * done / max(total, 1)
+                ),
+            )
+        else:
+            note("Writing DXF", 0.2)
+            paths = export(
+                job.result, export_settings, out_dir,
+                labels=job.labels if export_settings.include_labels else None,
+                label_depth_mm=settings.labels.depth_mm,
+                parts=job.parts,
+            )
+
+        note("Packing zip", 0.93)
+        archive = WORK_DIR / state.run_id / f"{_zip_stem(job, export_settings)}.zip"
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in paths:
+                zf.write(path, path.name)
+            zf.writestr("Layout report.txt", _report(job, export_settings))
+
+        with state.lock:
+            state.export_files = [p.name for p in paths]
+            state.export_zip = archive.name
+            state.export_stage = "done"
+            state.export_progress = 1.0
+    except Exception as exc:
+        with state.lock:
+            state.export_error = f"{type(exc).__name__}: {exc}"
+            state.export_stage = "error"
+            state.export_progress = 1.0
+        traceback.print_exc()
+
+
+def _zip_stem(job: Job, settings: ExportSettings) -> str:
+    kind = {
+        "dxf_per_sheet": "DXF by sheet",
+        "dxf_per_part": "DXF by part",
+        "step_per_sheet": "STEP by sheet",
+    }.get(settings.mode, "export")
+    return f"{Path(job.source_name).stem} - {kind}"
+
+
+@app.get("/api/run/{run_id}/export/status")
+def export_status(run_id: str) -> dict[str, Any]:
+    state = _runs.get(run_id)
+    if state is None:
+        raise HTTPException(404, "Unknown run")
+    with state.lock:
+        return {
+            "stage": state.export_stage,
+            "progress": state.export_progress,
+            "error": state.export_error,
+            "files": state.export_files,
+            "zip": state.export_zip,
+            "download": f"/api/run/{run_id}/download",
+        }
 
 
 def _report(job: Job, settings: ExportSettings) -> str:
@@ -263,16 +332,16 @@ def _report(job: Job, settings: ExportSettings) -> str:
         f"plynest layout report for {job.source_name}",
         "=" * 60,
         f"Parts nested : {len(job.parts)}",
-        f"Sheets        : {job.result.sheet_count()}",
-        f"Utilisation   : {job.result.total_utilisation() * 100:.1f}%",
-        f"DXF units     : {unit}",
+        f"Sheets       : {job.result.sheet_count()}",
+        f"Utilisation  : {job.result.total_utilisation() * 100:.1f}%",
+        f"Units        : {unit}",
+        f"Export       : {settings.mode}",
         "",
     ]
     for sheet in job.result.sheets:
         lines.append(
-            f"Sheet {sheet.index + 1:02d}  "
-            f"{from_mm(sheet.thickness, unit):.4g} {unit} stock  "
-            f"{len(sheet.placements)} parts  {sheet.utilisation() * 100:.1f}% used"
+            f"{sheet_name(sheet.index, sheet.thickness, unit)}  "
+            f"-  {len(sheet.placements)} parts, {sheet.utilisation() * 100:.1f}% used"
         )
         for placement in sorted(sheet.placements, key=lambda p: p.part.label):
             part = placement.part
@@ -298,8 +367,11 @@ def download(run_id: str):
     state = _runs.get(run_id)
     if state is None or state.job is None:
         raise HTTPException(404, "Unknown run")
-    stem = Path(state.job.source_name).stem
-    archive = WORK_DIR / run_id / f"{stem}_dxf.zip"
+    with state.lock:
+        name = state.export_zip
+    if not name:
+        raise HTTPException(404, "Nothing exported yet")
+    archive = WORK_DIR / run_id / name
     if not archive.exists():
         raise HTTPException(404, "Nothing exported yet")
     return FileResponse(archive, filename=archive.name, media_type="application/zip")

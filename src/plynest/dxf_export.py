@@ -1,14 +1,16 @@
-"""Write nested sheets out as DXF.
+"""Write nested sheets, or individual parts, out as DXF.
 
 Closed profiles become single closed LWPOLYLINEs carrying bulge factors, so an
 arc stays an arc all the way into CAM rather than arriving as a hundred tiny
-chords.  Geometry is nominal: kerf was handled as spacing during nesting, so the
-outlines here are true part size and the CAM applies the tool offset.
+chords.  Engraved labels come through the same way.
+
+Geometry is nominal: kerf was handled as spacing during nesting, so the outlines
+here are true part size and the CAM applies the tool offset.
+
+Layers are named for the depth to cut, measured down from the part's top face.
 """
 from __future__ import annotations
 
-import math
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,10 +18,19 @@ import ezdxf
 from ezdxf.document import Drawing
 
 from .config import ExportSettings
-from .geom2d import Arc, Contour, Point, Region
+from .geom2d import Arc, Contour, Region, Segment, split_wide_arcs
 from .labels import LabelPlacement
+from .naming import (
+    engrave_layer,
+    pocket_layer,
+    safe_filename,
+    sheet_name,
+    through_layer,
+    unique_filenames,
+)
 from .nest import NestResult, Sheet
-from .units import INSUNITS, from_mm
+from .part import Part
+from .units import INSUNITS
 
 # ACI colour indices, cycled per depth so layers are distinguishable on screen.
 DEPTH_COLOURS = [3, 4, 6, 2, 5, 30, 40, 50, 211, 141]
@@ -28,26 +39,8 @@ COLOUR_LABEL = 7
 COLOUR_SHEET = 8
 COLOUR_KEEPOUT = 9
 
-LAYER_SHEET = "SHEET_OUTLINE"
-LAYER_KEEPOUT = "EDGE_KEEPOUT"
-
-
-def _fmt_depth(depth_mm: float, unit: str) -> str:
-    v = from_mm(depth_mm, unit)
-    text = f"{v:.4f}".rstrip("0").rstrip(".") if unit == "in" else f"{v:.2f}".rstrip("0").rstrip(".")
-    return text.replace(".", "p").replace("-", "n")
-
-
-def through_layer(depth_mm: float, unit: str) -> str:
-    return f"CUT_THROUGH_{_fmt_depth(depth_mm, unit)}"
-
-
-def pocket_layer(depth_mm: float, unit: str) -> str:
-    return f"POCKET_{_fmt_depth(depth_mm, unit)}"
-
-
-def engrave_layer(depth_mm: float, unit: str) -> str:
-    return f"ENGRAVE_{_fmt_depth(depth_mm, unit)}"
+LAYER_SHEET = "SHEET OUTLINE"
+LAYER_KEEPOUT = "EDGE KEEP-OUT"
 
 
 @dataclass
@@ -56,10 +49,8 @@ class SheetGeometry:
 
     sheet: Sheet
     by_depth: dict[float, list[Region]]
-    labels: list[tuple[float, list[list[Point]]]]
-
-    def depths(self) -> list[float]:
-        return sorted(self.by_depth)
+    label_paths: list[tuple[Segment, ...]]
+    label_depth: float
 
 
 def collect_sheet_geometry(
@@ -69,34 +60,40 @@ def collect_sheet_geometry(
 ) -> SheetGeometry:
     """Transform every placed part's 2D features into sheet coordinates."""
     by_depth: dict[float, list[Region]] = {}
-    label_strokes: list[list[Point]] = []
+    paths: list[tuple[Segment, ...]] = []
 
     for placement in sheet.placements:
         ang, dx, dy = placement.transform()
         part = placement.part
 
-        cut = round(part.thickness, 4)
-        by_depth.setdefault(cut, []).append(part.profile.transformed(ang, dx, dy))
-
+        by_depth.setdefault(round(part.thickness, 4), []).append(
+            part.profile.transformed(ang, dx, dy)
+        )
         for pocket in part.pockets:
-            d = round(pocket.depth, 4)
-            by_depth.setdefault(d, []).append(pocket.region.transformed(ang, dx, dy))
+            by_depth.setdefault(round(pocket.depth, 4), []).append(
+                pocket.region.transformed(ang, dx, dy)
+            )
 
-        placement_label = (labels or {}).get(part.id)
-        if placement_label and placement_label.fitted:
-            cos_a, sin_a = math.cos(ang), math.sin(ang)
-            for stroke in placement_label.strokes:
-                label_strokes.append([
-                    Point(p.x * cos_a - p.y * sin_a + dx, p.x * sin_a + p.y * cos_a + dy)
-                    for p in stroke
-                ])
+        placed = (labels or {}).get(part.id)
+        if placed and placed.fitted:
+            paths.extend(placed.transformed(ang, dx, dy).paths)
 
-    labels_out = [(round(label_depth_mm, 4), label_strokes)] if label_strokes else []
-    return SheetGeometry(sheet=sheet, by_depth=by_depth, labels=labels_out)
+    return SheetGeometry(sheet, by_depth, paths, round(label_depth_mm, 4))
 
 
 def _new_doc(settings: ExportSettings) -> Drawing:
-    doc = ezdxf.new(settings.dxf_version, setup=True)
+    # setup=False: the standard setup adds Defpoints and a pile of text styles,
+    # dimension styles and linetypes that only clutter a cut file.
+    doc = ezdxf.new(settings.dxf_version, setup=False)
+    # ezdxf creates Defpoints regardless of setup, and recreates it on every
+    # write: it is an AutoCAD convention for non-plotting construction points
+    # and only clutters a cut file.  Drop it and stop it coming back, so the
+    # layer list is exactly what we drew.  Layer "0" is mandatory in every DXF
+    # and has to stay, but nothing is ever drawn on it.
+    if "Defpoints" in doc.layers:
+        doc.layers.remove("Defpoints")
+    if hasattr(doc, "_create_required_layers"):
+        doc._create_required_layers = lambda: None
     doc.header["$INSUNITS"] = INSUNITS[settings.unit]
     doc.header["$MEASUREMENT"] = 0 if settings.unit == "in" else 1
     doc.header["$LUNITS"] = 2
@@ -115,21 +112,41 @@ def _add_contour(msp, contour: Contour, layer: str, scale: float,
     segs = contour.segments
     if len(segs) == 1 and isinstance(segs[0], Arc) and segs[0].full:
         arc = segs[0]
-        msp.add_circle(
-            ((arc.center.x + ox) * scale, (arc.center.y + oy) * scale),
-            arc.radius * scale,
-            dxfattribs={"layer": layer},
-        )
+        msp.add_circle(((arc.center.x + ox) * scale, (arc.center.y + oy) * scale),
+                       arc.radius * scale, dxfattribs={"layer": layer})
         return
 
-    points: list[tuple[float, float, float, float, float]] = []
-    for seg in segs:
-        bulge = seg.bulge() if isinstance(seg, Arc) else 0.0
-        p = seg.start
-        points.append(((p.x + ox) * scale, (p.y + oy) * scale, 0.0, 0.0, bulge))
+    points = [
+        ((seg.start.x + ox) * scale, (seg.start.y + oy) * scale, 0.0, 0.0,
+         seg.bulge() if isinstance(seg, Arc) else 0.0)
+        for seg in split_wide_arcs(segs)
+    ]
+    if points:
+        msp.add_lwpolyline(points, format="xyseb", close=True, dxfattribs={"layer": layer})
+
+
+def _add_open_path(msp, path: tuple[Segment, ...], layer: str, scale: float,
+                   offset: tuple[float, float]) -> None:
+    """Emit one open chain (a label stroke) keeping its arcs."""
+    ox, oy = offset
+    segs = list(path)
+    if len(segs) == 1 and isinstance(segs[0], Arc) and segs[0].full:
+        arc = segs[0]
+        msp.add_circle(((arc.center.x + ox) * scale, (arc.center.y + oy) * scale),
+                       arc.radius * scale, dxfattribs={"layer": layer})
+        return
+
+    segs = split_wide_arcs(segs)
+    points = [
+        ((seg.start.x + ox) * scale, (seg.start.y + oy) * scale, 0.0, 0.0,
+         seg.bulge() if isinstance(seg, Arc) else 0.0)
+        for seg in segs
+    ]
     if not points:
         return
-    msp.add_lwpolyline(points, format="xyseb", close=True, dxfattribs={"layer": layer})
+    end = segs[-1].end
+    points.append(((end.x + ox) * scale, (end.y + oy) * scale, 0.0, 0.0, 0.0))
+    msp.add_lwpolyline(points, format="xyseb", close=False, dxfattribs={"layer": layer})
 
 
 def _add_region(msp, region: Region, layer: str, scale: float,
@@ -139,66 +156,70 @@ def _add_region(msp, region: Region, layer: str, scale: float,
         _add_contour(msp, hole, layer, scale, offset)
 
 
-def _add_rect(msp, x0: float, y0: float, x1: float, y1: float, layer: str,
-              scale: float, offset: tuple[float, float]) -> None:
+def _add_rect(msp, x0, y0, x1, y1, layer: str, scale: float,
+              offset: tuple[float, float]) -> None:
     ox, oy = offset
-    pts = [
-        ((x0 + ox) * scale, (y0 + oy) * scale),
-        ((x1 + ox) * scale, (y0 + oy) * scale),
-        ((x1 + ox) * scale, (y1 + oy) * scale),
-        ((x0 + ox) * scale, (y1 + oy) * scale),
-    ]
-    msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": layer})
+    msp.add_lwpolyline(
+        [((x0 + ox) * scale, (y0 + oy) * scale), ((x1 + ox) * scale, (y0 + oy) * scale),
+         ((x1 + ox) * scale, (y1 + oy) * scale), ((x0 + ox) * scale, (y1 + oy) * scale)],
+        close=True, dxfattribs={"layer": layer},
+    )
 
 
-def _draw_sheet(doc: Drawing, geom: SheetGeometry, settings: ExportSettings,
-                offset: tuple[float, float] = (0.0, 0.0),
-                only_depth: float | None = None) -> None:
+def _scale_for(settings: ExportSettings) -> float:
+    return 1.0 / 25.4 if settings.unit == "in" else 1.0
+
+
+def _draw_depths(doc: Drawing, by_depth: dict[float, list[Region]], through: float,
+                 settings: ExportSettings, scale: float,
+                 offset: tuple[float, float]) -> None:
     msp = doc.modelspace()
-    scale = 1.0 / 25.4 if settings.unit == "in" else 1.0
-    sheet = geom.sheet
-    unit = settings.unit
-
-    if only_depth is None:
-        if settings.include_sheet_outline:
-            _ensure_layer(doc, LAYER_SHEET, COLOUR_SHEET)
-            _add_rect(msp, 0, 0, sheet.spec.width_mm, sheet.spec.height_mm,
-                      LAYER_SHEET, scale, offset)
-        if settings.include_keepout:
-            _ensure_layer(doc, LAYER_KEEPOUT, COLOUR_KEEPOUT)
-            x0, y0, x1, y1 = sheet.usable
-            _add_rect(msp, x0, y0, x1, y1, LAYER_KEEPOUT, scale, offset)
-
-    cut_depth = round(sheet.thickness, 4)
-    for i, depth in enumerate(geom.depths()):
-        if only_depth is not None and abs(depth - only_depth) > 1e-6:
-            continue
-        is_through = abs(depth - cut_depth) < 1e-6
-        layer = through_layer(depth, unit) if is_through else pocket_layer(depth, unit)
-        colour = COLOUR_THROUGH if is_through else DEPTH_COLOURS[i % len(DEPTH_COLOURS)]
-        _ensure_layer(doc, layer, colour)
-        for region in geom.by_depth[depth]:
+    for i, depth in enumerate(sorted(by_depth)):
+        is_through = abs(depth - through) < 1e-6
+        layer = (through_layer if is_through else pocket_layer)(depth, settings.unit)
+        _ensure_layer(doc, layer, COLOUR_THROUGH if is_through
+                      else DEPTH_COLOURS[i % len(DEPTH_COLOURS)])
+        for region in by_depth[depth]:
             _add_region(msp, region, layer, scale, offset)
 
-    if settings.include_labels:
-        for depth, strokes in geom.labels:
-            if only_depth is not None and abs(depth - only_depth) > 1e-6:
-                continue
-            layer = engrave_layer(depth, unit)
-            _ensure_layer(doc, layer, COLOUR_LABEL)
-            ox, oy = offset
-            for stroke in strokes:
-                if len(stroke) < 2:
-                    continue
-                msp.add_lwpolyline(
-                    [((p.x + ox) * scale, (p.y + oy) * scale) for p in stroke],
-                    close=False,
-                    dxfattribs={"layer": layer},
-                )
+
+def _draw_sheet(doc: Drawing, geom: SheetGeometry, settings: ExportSettings) -> None:
+    msp = doc.modelspace()
+    scale = _scale_for(settings)
+    sheet = geom.sheet
+    offset = (0.0, 0.0)
+
+    if settings.include_sheet_outline:
+        _ensure_layer(doc, LAYER_SHEET, COLOUR_SHEET)
+        _add_rect(msp, 0, 0, sheet.spec.width_mm, sheet.spec.height_mm,
+                  LAYER_SHEET, scale, offset)
+    if settings.include_keepout:
+        _ensure_layer(doc, LAYER_KEEPOUT, COLOUR_KEEPOUT)
+        _add_rect(msp, *sheet.usable, LAYER_KEEPOUT, scale, offset)
+
+    _draw_depths(doc, geom.by_depth, round(sheet.thickness, 4), settings, scale, offset)
+
+    if settings.include_labels and geom.label_paths:
+        layer = engrave_layer(geom.label_depth, settings.unit)
+        _ensure_layer(doc, layer, COLOUR_LABEL)
+        for path in geom.label_paths:
+            _add_open_path(msp, path, layer, scale, offset)
 
 
-def safe_name(text: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "sheet"
+def _draw_part(doc: Drawing, part: Part, label: LabelPlacement | None,
+               settings: ExportSettings, label_depth_mm: float) -> None:
+    """One part on its own, bounding box at the origin."""
+    scale = _scale_for(settings)
+    by_depth: dict[float, list[Region]] = {round(part.thickness, 4): [part.profile]}
+    for pocket in part.pockets:
+        by_depth.setdefault(round(pocket.depth, 4), []).append(pocket.region)
+    _draw_depths(doc, by_depth, round(part.thickness, 4), settings, scale, (0.0, 0.0))
+
+    if settings.include_labels and label and label.fitted:
+        layer = engrave_layer(round(label_depth_mm, 4), settings.unit)
+        _ensure_layer(doc, layer, COLOUR_LABEL)
+        for path in label.paths:
+            _add_open_path(doc.modelspace(), path, layer, scale, (0.0, 0.0))
 
 
 def export(
@@ -207,48 +228,32 @@ def export(
     out_dir: str | Path,
     labels: dict[str, LabelPlacement] | None = None,
     label_depth_mm: float = 1.0,
-    job_name: str = "layout",
+    parts: list[Part] | None = None,
 ) -> list[Path]:
     """Write DXF files for ``result`` and return the paths written."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    geoms = [collect_sheet_geometry(s, labels, label_depth_mm) for s in result.sheets]
-    stem = safe_name(job_name)
 
-    if settings.mode == "single_file":
-        doc = _new_doc(settings)
-        gap = 100.0
-        x = 0.0
-        for geom in geoms:
-            _draw_sheet(doc, geom, settings, offset=(x, 0.0))
-            x += geom.sheet.spec.width_mm + gap
-        path = out_dir / f"{stem}_all_sheets.dxf"
-        doc.saveas(path)
-        written.append(path)
-        return written
-
-    for geom in geoms:
-        sheet = geom.sheet
-        thick = _fmt_depth(sheet.thickness, settings.unit)
-        base = f"{stem}_sheet{sheet.index + 1:02d}_t{thick}"
-        if settings.mode == "per_depth":
-            depths = list(geom.depths())
-            if settings.include_labels and geom.labels:
-                depths += [d for d, _ in geom.labels if d not in depths]
-            for depth in sorted(set(depths)):
-                doc = _new_doc(settings)
-                _draw_sheet(doc, geom, settings, only_depth=depth)
-                if not len(doc.modelspace()):
-                    continue
-                path = out_dir / f"{base}_d{_fmt_depth(depth, settings.unit)}.dxf"
-                doc.saveas(path)
-                written.append(path)
-        else:
+    if settings.mode == "dxf_per_part":
+        source = parts if parts is not None else [
+            p.part for s in result.sheets for p in s.placements
+        ]
+        names = unique_filenames([p.label for p in source])
+        for part, name in zip(source, names):
             doc = _new_doc(settings)
-            _draw_sheet(doc, geom, settings)
-            path = out_dir / f"{base}.dxf"
+            _draw_part(doc, part, (labels or {}).get(part.id), settings, label_depth_mm)
+            path = out_dir / f"{name}.dxf"
             doc.saveas(path)
             written.append(path)
+        return written
 
+    for sheet in result.sheets:
+        geom = collect_sheet_geometry(sheet, labels, label_depth_mm)
+        doc = _new_doc(settings)
+        _draw_sheet(doc, geom, settings)
+        name = safe_filename(sheet_name(sheet.index, sheet.thickness, settings.unit))
+        path = out_dir / f"{name}.dxf"
+        doc.saveas(path)
+        written.append(path)
     return written

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 
 from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
@@ -126,3 +127,113 @@ def face_wires(face: TopoDS_Face) -> tuple[TopoDS_Wire, list[TopoDS_Wire]]:
             inners.append(w)
         ex.Next()
     return outer, inners
+
+
+def face_from_polygon(poly, z: float = 0.0, area_tol: float = 1e-3):
+    """Build a planar face at height ``z`` from a shapely Polygon (holes kept).
+
+    Returns None if the face does not come out with the polygon's area -- a
+    face whose holes failed to subtract makes the subsequent boolean quietly do
+    nothing, which is far worse than skipping it loudly.
+    """
+    from shapely.geometry.polygon import orient
+
+    from OCP.BRepBuilderAPI import (
+        BRepBuilderAPI_MakeFace,
+        BRepBuilderAPI_MakePolygon,
+    )
+
+    poly = orient(poly, 1.0)
+
+    def wire(coords):
+        builder = BRepBuilderAPI_MakePolygon()
+        pts = list(coords)
+        if len(pts) > 1 and abs(pts[0][0] - pts[-1][0]) < 1e-12 and abs(pts[0][1] - pts[-1][1]) < 1e-12:
+            pts = pts[:-1]
+        if len(pts) < 3:
+            return None
+        for x, y in pts:
+            builder.Add(gp_Pnt(x, y, z))
+        builder.Close()
+        return builder.Wire() if builder.IsDone() else None
+
+    outer = wire(poly.exterior.coords)
+    if outer is None:
+        return None
+    maker = BRepBuilderAPI_MakeFace(outer, True)
+    for ring in poly.interiors:
+        inner = wire(ring.coords)
+        if inner is not None:
+            # Add() orients an inner wire as a hole itself; reversing it first
+            # makes the "hole" add area instead of removing it.
+            maker.Add(inner)
+    if not maker.IsDone():
+        return None
+    face = maker.Face()
+    if abs(face_area(face) - poly.area) > max(area_tol, poly.area * 1e-6):
+        return None
+    return face
+
+
+def prism(face, dz: float):
+    """Extrude a face by ``dz`` along +Z."""
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakePrism
+
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, dz), False, True).Shape()
+
+
+def cut_many(base, tools: list):
+    """Subtract every shape in ``tools`` from ``base`` in one boolean."""
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.TopTools import TopTools_ListOfShape
+
+    if not tools:
+        return base
+    args = TopTools_ListOfShape()
+    args.Append(base)
+    cutters = TopTools_ListOfShape()
+    for t in tools:
+        cutters.Append(t)
+    op = BRepAlgoAPI_Cut()
+    op.SetArguments(args)
+    op.SetTools(cutters)
+    op.SetRunParallel(True)
+    op.Build()
+    if not op.IsDone():
+        return base
+    return op.Shape()
+
+
+def compound(shapes: list):
+    """Gather shapes into a single TopoDS_Compound."""
+    from OCP.BRep import BRep_Builder
+    from OCP.TopoDS import TopoDS_Compound
+
+    comp = TopoDS_Compound()
+    builder = BRep_Builder()
+    builder.MakeCompound(comp)
+    for s in shapes:
+        if s is not None and not s.IsNull():
+            builder.Add(comp, s)
+    return comp
+
+
+@contextmanager
+def quiet():
+    """Suppress OpenCASCADE's console banners.
+
+    The STEP writer prints a transfer-statistics block for every shape, which
+    buries anything useful in a 100-part export.
+    """
+    from OCP.Message import Message
+
+    messenger = Message.DefaultMessenger_s()
+    printers = messenger.Printers()
+    saved = [printers.Value(i) for i in range(printers.Lower(), printers.Upper() + 1)]
+    for printer in saved:
+        messenger.RemovePrinter(printer)
+    try:
+        yield
+    finally:
+        for printer in saved:
+            messenger.AddPrinter(printer)

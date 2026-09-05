@@ -121,7 +121,7 @@ def test_labels_never_cross_a_cut_feature(job):
             continue
         part = by_id[part_id]
         outline = part.profile.to_polygon()
-        for stroke in placement.strokes:
+        for stroke in placement.sampled():
             if len(stroke) < 2:
                 continue
             geom = LineString([(p.x, p.y) for p in stroke])
@@ -136,22 +136,20 @@ def test_through_holes_survive_into_the_dxf(job, tmp_path):
     holes_in_parts = sum(len(p.profile.holes) for p in job.parts)
     assert holes_in_parts > 0, "the sample assembly does have through holes"
 
-    paths = export(job.result, ExportSettings(unit="in", mode="per_sheet"),
-                   tmp_path, labels=job.labels)
+    paths = export(job.result, ExportSettings(unit="in"), tmp_path, labels=job.labels)
     circles = 0
     for path in paths:
         doc = ezdxf.readfile(path)
         circles += sum(
             1 for e in doc.modelspace()
-            if e.dxftype() == "CIRCLE" and e.dxf.layer.startswith("CUT_THROUGH")
+            if e.dxftype() == "CIRCLE" and e.dxf.layer.startswith("CUT THROUGH")
         )
     assert circles == holes_in_parts
 
 
 def test_dxf_round_trip_reproduces_every_part(job, tmp_path):
     """Export, re-read, and match each outline back to the part it came from."""
-    paths = export(job.result, ExportSettings(unit="in", mode="per_sheet"),
-                   tmp_path, labels=job.labels)
+    paths = export(job.result, ExportSettings(unit="in"), tmp_path, labels=job.labels)
     assert len(paths) == job.result.sheet_count()
 
     exported: Counter[tuple[float, float]] = Counter()
@@ -159,7 +157,7 @@ def test_dxf_round_trip_reproduces_every_part(job, tmp_path):
         doc = ezdxf.readfile(path)
         assert doc.header["$INSUNITS"] == 1
         for e in doc.modelspace():
-            if e.dxftype() != "LWPOLYLINE" or not e.dxf.layer.startswith("CUT_THROUGH"):
+            if e.dxftype() != "LWPOLYLINE" or not e.dxf.layer.startswith("CUT THROUGH"):
                 continue
             pts = [(p[0], p[1]) for p in e.get_points("xy")]
             xs = [p[0] for p in pts]
@@ -176,21 +174,96 @@ def test_dxf_round_trip_reproduces_every_part(job, tmp_path):
     assert exported == planned
 
 
-def test_export_modes_all_produce_readable_files(job, tmp_path):
-    for mode in ("per_sheet", "per_depth", "single_file"):
-        out = tmp_path / mode
-        paths = export(job.result, ExportSettings(unit="in", mode=mode), out,
-                       labels=job.labels)
-        assert paths, mode
-        if mode == "single_file":
-            assert len(paths) == 1
-        elif mode == "per_sheet":
-            assert len(paths) == job.result.sheet_count()
-        else:
-            assert len(paths) > job.result.sheet_count()
-        for path in paths:
-            doc = ezdxf.readfile(path)
-            assert len(doc.modelspace()) > 0, f"{path.name} is empty"
+def test_dxf_per_sheet_files_are_named_readably(job, tmp_path):
+    paths = export(job.result, ExportSettings(unit="in"), tmp_path, labels=job.labels)
+    assert len(paths) == job.result.sheet_count()
+    for i, path in enumerate(paths):
+        assert path.name.startswith(f"Sheet {i + 1}, ")
+        assert path.name.endswith(" in.dxf")
+
+
+def test_dxf_per_part_writes_one_readable_file_per_part(job, tmp_path):
+    paths = export(job.result, ExportSettings(unit="in", mode="dxf_per_part"),
+                   tmp_path, labels=job.labels, parts=job.parts)
+    assert len(paths) == len(job.parts)
+    assert len(set(p.name for p in paths)) == len(paths), "filenames collided"
+    for path in paths:
+        assert "/" not in path.stem
+        doc = ezdxf.readfile(path)
+        assert len(doc.modelspace()) > 0, f"{path.name} is empty"
+
+
+def test_dxf_per_part_holds_the_same_parts_as_the_layout(job, tmp_path):
+    """Per-part output ignores the nest, but must still cover every part once."""
+    paths = export(job.result, ExportSettings(unit="in", mode="dxf_per_part"),
+                   tmp_path, labels=job.labels, parts=job.parts)
+    sizes: Counter[tuple[float, float]] = Counter()
+    for path in paths:
+        doc = ezdxf.readfile(path)
+        outlines = [
+            e for e in doc.modelspace()
+            if e.dxftype() == "LWPOLYLINE" and e.dxf.layer.startswith("CUT THROUGH")
+        ]
+        assert outlines, f"{path.name} has no through cut"
+        biggest = max(outlines, key=lambda e: len(e))
+        pts = [(p[0], p[1]) for p in biggest.get_points("xy")]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        assert min(xs) == pytest.approx(0.0, abs=1e-6), "part should sit at the origin"
+        assert min(ys) == pytest.approx(0.0, abs=1e-6)
+        sizes[(round(max(xs) - min(xs), 3), round(max(ys) - min(ys), 3))] += 1
+
+    expected = Counter(
+        (round(p.width / MM_PER_INCH, 3), round(p.height / MM_PER_INCH, 3))
+        for p in job.parts
+    )
+    assert sizes == expected
+
+
+def test_no_dxf_draws_on_layer_zero(job, tmp_path):
+    paths = export(job.result, ExportSettings(unit="in"), tmp_path, labels=job.labels)
+    for path in paths:
+        doc = ezdxf.readfile(path)
+        assert "0" not in {e.dxf.layer for e in doc.modelspace()}
+        assert "Defpoints" not in path.read_text(errors="ignore")
+
+
+def test_step_export_reproduces_the_layout(job, tmp_path):
+    """The rearrange-my-assembly mode: same parts, same places, real geometry."""
+    from plynest.naming import sheet_name
+    from plynest.step_export import export_step
+    from plynest.step_loader import load_step as reload_step
+
+    settings = ExportSettings(mode="step_per_sheet", engrave_labels_in_step=False)
+    paths = export_step(
+        job.result, settings, tmp_path, job.sources,
+        sheet_namer=lambda sh: sheet_name(sh.index, sh.thickness, "in"),
+    )
+    assert len(paths) == job.result.sheet_count()
+
+    sheet = job.result.sheets[0]
+    reloaded = reload_step(paths[0])
+    assert len(reloaded) == len(sheet.placements)
+    assert sorted(s.name for s in reloaded) == sorted(p.part.label for p in sheet.placements)
+
+    by_name = {s.name: s for s in reloaded}
+    for placement in sheet.placements:
+        b = occ.bbox(by_name[placement.part.label].shape)
+        px0, py0, px1, py1 = placement.bounds()
+        assert (b[0], b[1], b[3], b[4]) == pytest.approx((px0, py0, px1, py1), abs=1e-3)
+        assert b[2] == pytest.approx(0.0, abs=1e-3)
+        assert b[5] == pytest.approx(placement.part.thickness, abs=1e-3)
+
+
+def test_step_export_preserves_every_solid_volume(job, tmp_path):
+    """Re-posing is rigid, so nothing may gain or lose material."""
+    from plynest.step_export import posed_solid
+
+    for sheet in job.result.sheets[:2]:
+        for placement in sheet.placements:
+            source = job.sources[placement.part.source_index]
+            moved = posed_solid(placement, source)
+            assert occ.volume(moved) == pytest.approx(occ.volume(source.shape), rel=1e-9)
 
 
 def test_material_utilisation_is_reasonable(job):

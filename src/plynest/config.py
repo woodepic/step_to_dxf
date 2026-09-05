@@ -7,7 +7,8 @@ from typing import Any, Literal
 from .units import MM_PER_INCH, to_mm
 
 RotationMode = Literal["none", "180", "90", "free"]
-DxfMode = Literal["per_sheet", "per_depth", "single_file"]
+ExportMode = Literal["dxf_per_sheet", "dxf_per_part", "step_per_sheet"]
+DxfMode = ExportMode  # kept as an alias; the export is no longer DXF-only
 LabelStyle = Literal["abbrev_path", "full_path", "parent_name", "name", "name_index"]
 
 ROTATION_ANGLES: dict[str, tuple[float, ...]] = {
@@ -75,11 +76,23 @@ class NestSettings:
 @dataclass
 class ExportSettings:
     unit: Literal["mm", "in"] = "in"
-    mode: DxfMode = "per_sheet"
+
+    mode: ExportMode = "dxf_per_sheet"
+    """``dxf_per_sheet``  one DXF per nested sheet, a layer per cut depth.
+    ``dxf_per_part``   one DXF per part at the origin; ignores the layout.
+    ``step_per_sheet`` one STEP per sheet: the original solids, re-posed into
+    the nested layout with the labels engraved into them."""
+
     include_labels: bool = True
     include_sheet_outline: bool = True
-    include_keepout: bool = True
+    include_keepout: bool = False
     dxf_version: str = "R2010"
+
+    engrave_labels_in_step: bool = True
+    """Cut the label strokes into the solids rather than only drawing them."""
+
+    engrave_tool_mm: float = 3.175
+    """Width of the engraved groove in a STEP export (a 1/8 in bit)."""
 
 
 @dataclass
