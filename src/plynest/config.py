@@ -7,6 +7,7 @@ from typing import Any, Literal
 from .units import MM_PER_INCH, to_mm
 
 RotationMode = Literal["none", "180", "90", "free"]
+NestEngine = Literal["auto", "rect", "polygon"]
 ExportMode = Literal["dxf_per_sheet", "dxf_per_part", "step_per_sheet"]
 DxfMode = ExportMode  # kept as an alias; the export is no longer DXF-only
 LabelStyle = Literal["abbrev_path", "full_path", "parent_name", "name", "name_index"]
@@ -68,7 +69,15 @@ class NestSettings:
     rotation: RotationMode = "90"
     sheet: SheetSpec = field(default_factory=SheetSpec)
     attempts: int = 6
-    """Distinct part orderings tried; the best result wins."""
+    """Search effort.
+
+    For the rectangle engine this is roughly the number of seconds spent trying
+    to beat the greedy packing; for the polygon engine it is the number of part
+    orderings tried."""
+
+    engine: NestEngine = "auto"
+    """``auto`` uses the rectangle engine when every part in a group is a
+    rectangle and falls back to the polygon nester otherwise."""
 
     seed: int = 12345
 

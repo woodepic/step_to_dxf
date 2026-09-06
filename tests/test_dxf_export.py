@@ -84,7 +84,9 @@ def test_units_conversion_to_inches(tmp_path):
     paths = export(result, ExportSettings(unit="in"), tmp_path)
     doc, entities = read(paths[0])
     assert doc.header["$INSUNITS"] == 1
-    assert extents(closed_polys(entities, "CUT THROUGH")[0]) == pytest.approx((10.0, 20.0), abs=1e-6)
+    # The nester is free to turn a part, so compare the size, not the pose.
+    assert sorted(extents(closed_polys(entities, "CUT THROUGH")[0])) == pytest.approx(
+        [10.0, 20.0], abs=1e-6)
 
 
 def test_units_stay_millimetres_when_asked(tmp_path):
@@ -92,7 +94,8 @@ def test_units_stay_millimetres_when_asked(tmp_path):
     paths = export(result, ExportSettings(unit="mm"), tmp_path)
     doc, entities = read(paths[0])
     assert doc.header["$INSUNITS"] == 4
-    assert extents(closed_polys(entities, "CUT THROUGH")[0]) == pytest.approx((254.0, 508.0), abs=1e-6)
+    assert sorted(extents(closed_polys(entities, "CUT THROUGH")[0])) == pytest.approx(
+        [254.0, 508.0], abs=1e-6)
 
 
 # --- naming ----------------------------------------------------------------

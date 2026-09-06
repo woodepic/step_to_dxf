@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from plynest.config import NestSettings, SheetSpec
+from plynest.config import ROTATION_ANGLES, NestSettings, SheetSpec
 from plynest.geom2d import Contour, Region
 from plynest.nest import nest
 from plynest.part import Part
@@ -199,3 +199,90 @@ def test_utilisation_is_a_sane_fraction():
     assert 0.0 < result.total_utilisation() <= 1.0
     for sheet in result.sheets:
         assert 0.0 < sheet.utilisation() <= 1.0
+
+
+# --- engine selection -------------------------------------------------------
+
+def test_rectangular_parts_use_the_rectangle_engine():
+    """It should beat the polygon nester, or at worst tie, on rectangles."""
+    parts = [make_part(f"p{i}", 300 + (i % 7) * 40, 420 + (i % 5) * 33) for i in range(40)]
+    rect = nest(parts, small_settings(engine="rect", attempts=2))
+    poly = nest(parts, small_settings(engine="polygon", attempts=4))
+    assert rect.unplaced == [] and poly.unplaced == []
+    assert rect.sheet_count() <= poly.sheet_count()
+
+
+def test_both_engines_honour_every_invariant():
+    parts = [make_part(f"p{i}", 200 + (i % 9) * 30, 260 + (i % 4) * 55) for i in range(30)]
+    for engine in ("rect", "polygon"):
+        settings = small_settings(engine=engine, kerf_mm=8.0, attempts=2)
+        result = nest(parts, settings)
+        assert result.unplaced == []
+        placed = [p.part.id for s in result.sheets for p in s.placements]
+        assert sorted(placed) == sorted(p.id for p in parts)
+        for sheet in result.sheets:
+            kx0, ky0, kx1, ky1 = sheet.usable
+            polys = [p.polygon() for p in sheet.placements]
+            for i, placement in enumerate(sheet.placements):
+                x0, y0, x1, y1 = placement.bounds()
+                assert x0 >= kx0 - 1e-6 and y0 >= ky0 - 1e-6
+                assert x1 <= kx1 + 1e-6 and y1 <= ky1 + 1e-6
+                for j in range(i + 1, len(polys)):
+                    assert not polys[i].overlaps(polys[j])
+                    assert polys[i].distance(polys[j]) >= settings.kerf_mm - 1e-6
+
+
+def test_an_irregular_part_falls_back_to_the_polygon_engine():
+    l_shape = Region(Contour.from_points(
+        [(0, 0), (900, 0), (900, 400), (400, 400), (400, 1800), (0, 1800)]
+    ))
+    odd = Part(id="L", label="L", path=("T", "L"), thickness=18.0, profile=l_shape)
+    parts = [odd] + [make_part(f"p{i}", 300, 400) for i in range(4)]
+    result = nest(parts, small_settings(engine="auto"))
+    assert result.unplaced == []
+    assert sum(len(s.placements) for s in result.sheets) == len(parts)
+
+
+def test_free_rotation_falls_back_to_the_polygon_engine():
+    """The rectangle engine only turns by 90 degrees."""
+    parts = [make_part(f"p{i}", 200, 300) for i in range(6)]
+    result = nest(parts, small_settings(rotation="free", engine="auto"))
+    assert result.unplaced == []
+    assert {p.angle for s in result.sheets for p in s.placements} <= set(
+        ROTATION_ANGLES["free"]
+    )
+
+
+def test_grain_preserving_mode_never_turns_a_part():
+    parts = [make_part(f"p{i}", 150, 700) for i in range(8)]
+    for engine in ("rect", "polygon"):
+        result = nest(parts, small_settings(rotation="180", engine=engine))
+        for placement in (p for s in result.sheets for p in s.placements):
+            x0, y0, x1, y1 = placement.bounds()
+            assert (x1 - x0, y1 - y0) == pytest.approx((150.0, 700.0))
+
+
+def test_oversize_parts_are_reported_by_the_rectangle_engine_too():
+    parts = [make_part("ok", 200, 200), make_part("huge", 5000, 5000)]
+    result = nest(parts, small_settings(engine="rect"))
+    assert [p.id for p, _ in result.unplaced] == ["huge"]
+    assert "exceeds" in result.unplaced[0][1]
+    assert [p.part.id for s in result.sheets for p in s.placements] == ["ok"]
+
+
+def test_rectangle_engine_reaches_the_lower_bound_on_an_exact_fit():
+    """Twelve parts that tile three sheets exactly should use three."""
+    settings = small_settings(kerf_mm=0.0, edge_keepout_mm=0.0, attempts=3,
+                              engine="rect")
+    parts = [make_part(f"p{i}", 500.0, 1000.0) for i in range(12)]
+    result = nest(parts, settings)
+    assert result.unplaced == []
+    assert result.sheet_count() == 3
+
+
+def test_more_effort_never_makes_the_layout_worse():
+    parts = [make_part(f"p{i}", 170 + (i % 13) * 21, 230 + (i % 5) * 41)
+             for i in range(60)]
+    quick = nest(parts, small_settings(attempts=0, engine="rect"))
+    slow = nest(parts, small_settings(attempts=3, engine="rect"))
+    assert slow.sheet_count() <= quick.sheet_count()

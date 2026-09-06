@@ -58,8 +58,8 @@
               <option value="free">Any angle</option>
             </select>
           </label>
-          <label>Search effort <span class="q" title="How many part orderings to try. More is slower but may save a sheet.">?</span>
-            <input type="number" id="attempts" min="1" max="24" step="1"></label>
+          <label>Search effort <span class="q" title="Roughly how many seconds to spend trying to beat the first packing. The search stops early once it proves it cannot do better, so a high setting costs nothing on easy jobs.">?</span>
+            <input type="number" id="attempts" min="0" max="120" step="1"></label>
         </div>
       </fieldset>
 

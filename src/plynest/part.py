@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .geom2d import ARC_CHORD_TOL, Region
+from .geom2d import ARC_CHORD_TOL, Line, Region
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,23 @@ class Part:
     @property
     def area(self) -> float:
         return self.profile.area()
+
+    def is_rectangle(self, tol: float = 1e-6) -> bool:
+        """True when the outline is an axis-aligned rectangle.
+
+        Holes do not matter: nesting collides on the solid outline, so a panel
+        full of drilling is still a rectangle as far as packing is concerned.
+        """
+        segments = self.profile.outer.segments
+        if len(segments) != 4 or not all(isinstance(s, Line) for s in segments):
+            return False
+        for seg in segments:
+            if abs(seg.start.x - seg.end.x) > tol and abs(seg.start.y - seg.end.y) > tol:
+                return False
+        x0, y0, x1, y1 = self.profile.outer.bounds()
+        return abs(abs(self.profile.outer.signed_area()) - (x1 - x0) * (y1 - y0)) <= max(
+            tol, (x1 - x0) * (y1 - y0) * 1e-9
+        )
 
     def depths(self) -> list[float]:
         """Distinct machining depths, shallowest first, through-cut last."""

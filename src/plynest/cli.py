@@ -36,7 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--edge-keepout", type=float, default=1.0,
                    help="uncuttable border for hold-downs (default: 1.0 in)")
     p.add_argument("--rotation", choices=["none", "180", "90", "free"], default="90")
-    p.add_argument("--attempts", type=int, default=6)
+    p.add_argument("--attempts", type=int, default=6, metavar="EFFORT",
+                   help="search effort: roughly seconds spent improving on the "
+                        "first packing (default: 6). The search stops early "
+                        "once it reaches the provable lower bound")
+    p.add_argument("--engine", choices=["auto", "rect", "polygon"], default="auto",
+                   help="auto picks the rectangle engine when every part in a "
+                        "stock group is rectangular (default: auto)")
     p.add_argument("--mode",
                    choices=["dxf_per_sheet", "dxf_per_part", "step_per_sheet"],
                    default="dxf_per_sheet",
@@ -87,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
             rotation=args.rotation,
             sheet=SheetSpec.from_units(args.sheet_width, args.sheet_height, unit),
             attempts=args.attempts,
+            engine=args.engine,
         ),
         labels=LabelSettings(
             enabled=not args.no_labels,

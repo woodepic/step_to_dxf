@@ -79,30 +79,82 @@ arc tessellation and nothing else. This runs as a test.
 
 ## Nesting
 
-Bottom-left fill over true outlines, not bounding boxes — an L-shaped part lets
-a neighbour tuck into its notch. Candidate positions come from the edges of
-already-placed parts, which is where the contacts in an optimal packing always
-are.
+Sheet-goods parts are overwhelmingly rectangles, and rectangles have a much
+better literature than general nesting, so there are two engines. `auto` picks
+the rectangle one whenever every part in a stock group is rectangular, and falls
+back to the polygon nester otherwise.
 
-Three things lift it from "works" to "near optimal":
+### The rectangle engine
 
-- several part orderings, each tried in two scan directions;
-- a **consolidation pass** that tries to empty the least-used sheet into the
-  others — this is what removes the half-empty sheet first-fit always leaves;
-- exact clearance as a distance test, so parts can genuinely butt up at one kerf.
+Two ideas from the literature do the work:
+
+**Maximal rectangles** — free space is kept as the set of maximal empty
+rectangles rather than a skyline, so a part can drop into any gap, including one
+enclosed by parts placed earlier, which a bottom-left scan can never reach. Four
+fit rules are tried (Best Short Side Fit, Best Long Side Fit, Best Area Fit,
+Bottom-Left) across six orderings; BSSF usually but not always wins. This is
+Jylänki's MaxRects family.
+
+**Goal-driven ruin and recreate, with late acceptance** — a greedy pass alone
+plateaus almost immediately, which is the trap the first version of this program
+fell into: reordering the parts and re-running the same decoder just explores one
+basin. Instead the search fixes a target of one fewer sheet and repeatedly ruins
+part of the layout — a few whole sheets, a patch around a random part, or a
+scattered slice — then rebuilds it, driving the *homeless area* to zero. That is
+a far sharper signal than nudging a general objective and hoping a sheet empties.
+Late-acceptance hill climbing compares against what the search held some
+iterations ago, so it can walk through worse layouts to reach better ones.
+
+Three details matter in practice:
+
+- **The kerf is handled by inflation.** Every part and the sheet grow by one
+  kerf, and the gap between neighbours falls out of the arithmetic with no
+  special cases at the sheet edge.
+- **The search stops when it is provably done.** It computes the continuous area
+  lower bound and returns the moment it reaches it — which is why a high effort
+  setting costs nothing on an easy job.
+- **Hopeless targets are abandoned.** Most targets clear the area bound but are
+  geometrically impossible; after a spell without progress the search writes that
+  target off rather than grinding to the end of the budget.
+
+`Search effort` is roughly the number of seconds spent trying to beat the first
+packing. Unlike the old nester, spending more genuinely buys more: when the
+direct attempt stalls, the search restarts the same target from a completely
+different randomised packing.
+
+### What it is worth
+
+On the sample assembly: **10 sheets to 9**, and 9 is the proven lower bound
+(4 + 5), so that job is now optimal. Utilisation 70.9% → 78.8%.
+
+Across 16 randomly generated kitchen jobs (33–156 parts each):
+
+| | sheets | time |
+|---|---|---|
+| polygon engine | 166 | 8.3 s |
+| rectangle engine | **160** | 21.5 s |
+
+**3.6% less plywood**, better on 6 jobs and worse on none. It is also far faster
+at scale on hard instances — a 600-part instance went from 288 s to 10 s.
+
+`bench/` holds the harness: instances with known optima built by guillotine-
+cutting whole sheets, realistic kitchen jobs, and a population comparison.
+
+### The polygon engine
+
+Bottom-left fill over true outlines, with candidate positions taken from the
+edges of already-placed parts, plus a consolidation pass that empties the
+least-used sheet into the others. It handles genuinely irregular parts — an
+L-shaped part lets a neighbour tuck into its notch — and free-angle rotation.
+
+### Both engines
 
 Parts of different thickness never share a sheet; they are different stock.
 
 **Kerf is spacing, not an offset.** Exported outlines are true part size and the
-gap between neighbours is guaranteed to be at least the kerf, so your CAM
-applies the tool offset as usual. Edge keep-out is the border left free for
-hold-down bolts and clamps.
-
-On the sample assembly the ½″ group packs to 5 sheets averaging 83%. The ¾″
-group also takes 5: its panels are 693 mm wide on a 1168 mm usable width, so
-they can only sit one per row, and 5 is essentially the floor.
-
----
+gap between neighbours is guaranteed to be at least the kerf, so your CAM applies
+the tool offset as usual. Edge keep-out is the border left free for hold-down
+bolts and clamps.
 
 ## Labels
 
@@ -195,7 +247,8 @@ engrave depth, corner, naming style, edge margin, feature clearance and case.
 plynest STEP [-o OUT] [--unit {in,mm}]
              [--sheet-width W] [--sheet-height H]
              [--kerf K] [--edge-keepout E]
-             [--rotation {none,180,90,free}] [--attempts N]
+             [--rotation {none,180,90,free}] [--attempts EFFORT]
+             [--engine {auto,rect,polygon}]
              [--mode {dxf_per_sheet,dxf_per_part,step_per_sheet}]
              [--no-labels] [--label-height H] [--label-depth D]
              [--label-corner ...] [--label-style ...]
@@ -212,7 +265,7 @@ could not be placed.
 ## Tests
 
 ```bash
-./venv/bin/python -m pytest        # 300 tests, ~40 s
+./venv/bin/python -m pytest        # 343 tests, ~40 s
 ```
 
 The suite covers geometry transforms and exact arc maths, font coverage,
@@ -251,7 +304,8 @@ src/plynest/
   part.py          the sheet-part model
   font.py          built-in single-stroke engraving font, arcs and all
   labels.py        where a label can legally go
-  nest.py          the packer
+  nest.py          the packer, and the choice between engines
+  nest_rect.py     maximal rectangles + ruin-and-recreate search
   naming.py        readable file and layer names
   dxf_export.py    DXF writing
   step_export.py   re-posing the original solids, engraving included
@@ -264,3 +318,28 @@ src/plynest/
 
 Python 3.10+, and `cadquery-ocp` (OpenCASCADE), `ezdxf`, `shapely`, `numpy`,
 `fastapi`. Everything installs from PyPI; no conda needed.
+
+---
+
+## References
+
+The rectangle engine follows:
+
+- Jukka Jylänki, *A Thousand Ways to Pack the Bin — A Practical Approach to
+  Two-Dimensional Rectangle Bin Packing* (2010) — the MaxRects family and the
+  fit rules, with Best Short Side Fit as the usual winner.
+- E. K. Burke, G. Kendall, G. Whitwell, *A New Placement Heuristic for the
+  Orthogonal Stock-Cutting Problem*, Operations Research 52(4), 2004 — the idea
+  that dynamic selection (fit the item to the gap, rather than following a fixed
+  order) beats a fixed-order decoder.
+- G. Schrimpf et al., *Record Breaking Optimization Results Using the Ruin and
+  Recreate Principle*, J. Computational Physics 159, 1999 — ruin and recreate.
+- E. K. Burke, Y. Bykov, *The Late Acceptance Hill-Climbing Heuristic* (2017) —
+  the acceptance criterion, which is what lets the search cross worse solutions.
+- Goal-driven ruin-and-recreate for 2D bin packing, as in the GDRR line of work
+  — fixing a target bin count and minimising unplaced area, rather than
+  optimising a general objective and hoping a bin empties.
+
+The polygon engine is a bottom-left-fill in the style of Burke et al., *A New
+Bottom-Left-Fill Heuristic Algorithm for the Two-Dimensional Irregular Packing
+Problem*, Operations Research 54(3), 2006.

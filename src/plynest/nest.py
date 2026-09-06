@@ -26,6 +26,7 @@ from shapely.strtree import STRtree
 
 from .config import ROTATION_ANGLES, NestSettings, SheetSpec
 from .geom2d import ARC_CHORD_TOL, Region
+from .nest_rect import solve as rect_solve
 from .part import Part
 
 _EPS = 1e-6
@@ -425,11 +426,22 @@ def _pack_group(parts: list[Part], thickness: float, settings: NestSettings,
             usable.append(part)
     parts = usable
 
+    if not parts:
+        return [], unusable
+
+    # Rectangles get the dedicated engine: it searches far harder and runs an
+    # order of magnitude faster than pushing polygons around.
+    use_rect = settings.engine in ("auto", "rect")
+    if (use_rect and settings.rotation != "free"
+            and all(p.is_rectangle() for p in parts)):
+        packed = _rect_pack_group(parts, thickness, settings, rect, start_index)
+        if packed is not None:
+            sheets, unplaced = packed
+            return sheets, unplaced + unusable
+
     variant_cache = {p.id: _variants(p, angles) for p in parts}
 
     best: tuple[tuple, list[list[Placement]], list] | None = None
-    if not parts:
-        return [], unusable
     for ordered in _orderings(parts, max(1, settings.attempts), settings.seed):
         for scan in ("bl", "lb"):
             packers, assignments, unplaced = _place_all(
@@ -455,6 +467,61 @@ def _pack_group(parts: list[Part], thickness: float, settings: NestSettings,
                   placements=placements, usable=rect)
         )
     return sheets, unplaced
+
+
+def _rect_pack_group(parts: list[Part], thickness: float, settings: NestSettings,
+                     rect: tuple[float, float, float, float], start_index: int):
+    """Pack a group of rectangular parts with the maximal-rectangles engine."""
+    x0, y0, x1, y1 = rect
+    usable_w, usable_h = x1 - x0, y1 - y0
+    kerf = max(0.0, settings.kerf_mm)
+
+    sizes = [(p.width, p.height) for p in parts]
+    oversize = [
+        (p, f"{p.width:.1f} x {p.height:.1f} mm exceeds the usable "
+            f"{usable_w:.1f} x {usable_h:.1f} mm sheet area")
+        for p in parts
+        if not _fits_sheet(p, usable_w, usable_h, settings.rotation)
+    ]
+    if oversize:
+        skip = {id(p) for p, _ in oversize}
+        parts = [p for p in parts if id(p) not in skip]
+        sizes = [(p.width, p.height) for p in parts]
+    if not parts:
+        return [], oversize
+
+    rotations = (False, True) if settings.rotation == "90" else (False,)
+    bins, _report = rect_solve(
+        sizes, usable_w, usable_h, kerf=kerf, rotations=rotations,
+        effort=float(max(0, settings.attempts)), seed=settings.seed,
+    )
+    if bins is None:
+        return None
+
+    sheets: list[Sheet] = []
+    for placements in bins:
+        sheet = Sheet(index=start_index + len(sheets), thickness=thickness,
+                      spec=settings.sheet, usable=rect)
+        for placed in placements:
+            part = parts[placed.key]
+            angle = 90.0 if placed.rotated else 0.0
+            region = part.profile.transformed(math.radians(angle), 0.0, 0.0)
+            rx0, ry0, _, _ = region.bounds()
+            sheet.placements.append(
+                Placement(part, angle, x0 + placed.x - rx0, y0 + placed.y - ry0)
+            )
+        if sheet.placements:
+            sheets.append(sheet)
+    return sheets, oversize
+
+
+def _fits_sheet(part: Part, usable_w: float, usable_h: float, rotation: str) -> bool:
+    w, h = part.width, part.height
+    if w <= usable_w + _EPS and h <= usable_h + _EPS:
+        return True
+    if rotation == "90" and h <= usable_w + _EPS and w <= usable_h + _EPS:
+        return True
+    return False
 
 
 def nest(parts: list[Part], settings: NestSettings) -> NestResult:
